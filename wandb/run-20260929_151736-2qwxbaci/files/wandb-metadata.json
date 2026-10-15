@@ -1,0 +1,57 @@
+{
+  "os": "Linux-6.8.0-111-generic-x86_64-with-glibc2.35",
+  "python": "CPython 3.10.12",
+  "startedAt": "2026-09-29T07:17:36.053282Z",
+  "args": [
+    "--total-timesteps",
+    "100000",
+    "--num-envs",
+    "1",
+    "--learning-rate",
+    "1e-4",
+    "--seed",
+    "1",
+    "--target-mode",
+    "fixed",
+    "--target-pos",
+    "0.3",
+    "0.0",
+    "0.2905",
+    "--track"
+  ],
+  "program": "/home/zhongyu/wzy_master/UR5-Reinforcement-Learning/Algorithms/ppo_continuous_action.py",
+  "codePath": "Algorithms/ppo_continuous_action.py",
+  "codePathLocal": "Algorithms/ppo_continuous_action.py",
+  "git": {
+    "remote": "https://github.com/niccolasparra/UR5-Reinforcement-Learning.git",
+    "commit": "afa1ccf030d2e6d068884dee8192ec0b03a8462f"
+  },
+  "email": "1823152135@qq.com",
+  "root": "/home/zhongyu/wzy_master/UR5-Reinforcement-Learning",
+  "host": "zhongyu-ROG-Strix-G16-G614PM-G614PM",
+  "executable": "/home/zhongyu/wzy_master/UR5-Reinforcement-Learning/.venv/bin/python",
+  "cpu_count": 16,
+  "cpu_count_logical": 32,
+  "gpu": "NVIDIA GeForce RTX 5060 Laptop GPU",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "340148641792",
+      "used": "202872279040"
+    }
+  },
+  "memory": {
+    "total": "32808775680"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 5060 Laptop GPU",
+      "memoryTotal": "8546942976",
+      "cudaCores": 3328,
+      "architecture": "Blackwell",
+      "uuid": "GPU-87d06961-7f77-83f1-5d89-f3d80702150b"
+    }
+  ],
+  "cudaVersion": "13.0",
+  "writerId": "f0qv4ldyn4d6gkwnncdcjkkpgx2epble"
+}

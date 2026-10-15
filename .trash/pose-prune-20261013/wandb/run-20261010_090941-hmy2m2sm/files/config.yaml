@@ -1,0 +1,337 @@
+_wandb:
+    value:
+        cli_version: 0.30.0
+        code_path: code/Algorithms/ppo_continuous_action.py
+        e:
+            qajhtab67mh9cncbxtz0ymq9ppkh8e31:
+                args:
+                    - --env-id
+                    - RM75Pose-v0
+                    - --exp-name
+                    - RM75-pose-pure-ppo-v1
+                    - --network-profile
+                    - pose
+                    - --total-timesteps
+                    - "2000000"
+                    - --num-envs
+                    - "8"
+                    - --vector-env-mode
+                    - async
+                    - --num-steps
+                    - "256"
+                    - --num-minibatches
+                    - "8"
+                    - --update-epochs
+                    - "8"
+                    - --learning-rate
+                    - "3e-4"
+                    - --final-learning-rate
+                    - "3e-5"
+                    - --gamma
+                    - "0.99"
+                    - --gae-lambda
+                    - "0.95"
+                    - --clip-coef
+                    - "0.2"
+                    - --target-kl
+                    - "0.008"
+                    - --ent-coef
+                    - "0.0"
+                    - --initial-action-std
+                    - "0.30"
+                    - --final-action-std
+                    - "0.05"
+                    - --action-std-hold-fraction
+                    - "0.05"
+                    - --target-mode
+                    - random
+                    - --target-direction-mode
+                    - random_cone
+                    - --target-tilt-min-deg
+                    - "0"
+                    - --target-tilt-max-deg
+                    - "30"
+                    - --target-azimuth-min-deg
+                    - "-180"
+                    - --target-azimuth-max-deg
+                    - "180"
+                    - --approach-position-box
+                    - "-0.45"
+                    - "-0.35"
+                    - "-0.18"
+                    - "0.18"
+                    - --require-pose-feasible
+                    - --pose-feasibility-attempts
+                    - "50"
+                    - --orient-success-threshold-deg
+                    - "20"
+                    - --eval-interval
+                    - "100000"
+                    - --eval-episodes
+                    - "100"
+                    - --eval-seed
+                    - "20000"
+                    - --eval-max-collision-rate
+                    - "0.01"
+                    - --eval-target-success
+                    - "0.90"
+                    - --checkpoint-interval
+                    - "100000"
+                    - --track
+                codePath: Algorithms/ppo_continuous_action.py
+                codePathLocal: Algorithms/ppo_continuous_action.py
+                cpu_count: 16
+                cpu_count_logical: 32
+                cudaVersion: "13.0"
+                disk:
+                    /:
+                        total: "340148641792"
+                        used: "205814333440"
+                email: 1823152135@qq.com
+                executable: /home/zhongyu/wzy_master/UR5-Reinforcement-Learning/.venv/bin/python
+                git:
+                    commit: afa1ccf030d2e6d068884dee8192ec0b03a8462f
+                    remote: https://github.com/niccolasparra/UR5-Reinforcement-Learning.git
+                gpu: NVIDIA GeForce RTX 5060 Laptop GPU
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 3328
+                      memoryTotal: "8546942976"
+                      name: NVIDIA GeForce RTX 5060 Laptop GPU
+                      uuid: GPU-87d06961-7f77-83f1-5d89-f3d80702150b
+                host: zhongyu-ROG-Strix-G16-G614PM-G614PM
+                memory:
+                    total: "32808783872"
+                os: Linux-6.8.0-111-generic-x86_64-with-glibc2.35
+                program: /home/zhongyu/wzy_master/UR5-Reinforcement-Learning/Algorithms/ppo_continuous_action.py
+                python: CPython 3.10.12
+                root: /home/zhongyu/wzy_master/UR5-Reinforcement-Learning
+                startedAt: "2026-10-10T01:09:41.725772Z"
+                writerId: qajhtab67mh9cncbxtz0ymq9ppkh8e31
+        m: []
+        python_version: 3.10.12
+        t:
+            "1":
+                - 1
+            "2":
+                - 1
+            "3":
+                - 13
+                - 16
+                - 35
+            "4": 3.10.12
+            "5": 0.30.0
+            "12": 0.30.0
+            "13": linux-x86_64
+action_std_hold_fraction:
+    value: 0.05
+additional_timesteps:
+    value: 0
+anneal_lr:
+    value: true
+approach_curriculum:
+    value: false
+approach_position_box:
+    value:
+        - -0.45
+        - -0.35
+        - -0.18
+        - 0.18
+batch_size:
+    value: 2048
+capture_video:
+    value: false
+checkpoint_interval:
+    value: 100000
+clip_coef:
+    value: 0.2
+clip_vloss:
+    value: true
+collision_penalty:
+    value: 75
+cuda:
+    value: true
+curriculum_mastery_window:
+    value: 200
+curriculum_min_stage_steps:
+    value: 100000
+curriculum_promotion_success_rate:
+    value: 0.75
+curriculum_rollback_grace_steps:
+    value: 50000
+curriculum_rollback_success_rate:
+    value: 0.1
+curriculum_rollback_window:
+    value: 100
+curriculum_stage_action_std_decay_steps:
+    value: 300000
+curriculum_stage1_dist_success_thresh:
+    value: 0.12
+curriculum_stage1_orient_success_deg:
+    value: 40
+curriculum_stage1_position_box:
+    value:
+        - -0.42
+        - -0.36
+        - -0.1
+        - 0.1
+curriculum_stage1_tilt_deg:
+    value: 15
+curriculum_stage2_dist_success_thresh:
+    value: 0.1
+curriculum_stage2_orient_success_deg:
+    value: 35
+curriculum_stage2_position_box:
+    value:
+        - -0.42
+        - -0.36
+        - -0.1
+        - 0.1
+curriculum_stage2_tilt_deg:
+    value: 15
+curriculum_stage3_dist_success_thresh:
+    value: 0.085
+curriculum_stage3_orient_success_deg:
+    value: 30
+curriculum_stage3_position_box:
+    value:
+        - -0.43
+        - -0.36
+        - -0.12
+        - 0.12
+curriculum_stage3_promotion_success_rate:
+    value: 0.5
+curriculum_stage3_tilt_deg:
+    value: 20
+curriculum_stage4_dist_success_thresh:
+    value: 0.07
+curriculum_stage4_orient_success_deg:
+    value: 25
+curriculum_stage4_position_box:
+    value:
+        - -0.44
+        - -0.35
+        - -0.14
+        - 0.14
+curriculum_stage4_promotion_success_rate:
+    value: 0.6
+curriculum_stage4_tilt_deg:
+    value: 25
+curriculum_stage5_dist_success_thresh:
+    value: 0.06
+curriculum_stage5_orient_success_deg:
+    value: 22
+curriculum_stage5_position_box:
+    value:
+        - -0.45
+        - -0.35
+        - -0.16
+        - 0.16
+curriculum_stage5_promotion_success_rate:
+    value: 0.6
+curriculum_stage5_tilt_deg:
+    value: 30
+curriculum_start_stage:
+    value: 1
+ent_coef:
+    value: 0
+env_id:
+    value: RM75Pose-v0
+eval_episodes:
+    value: 100
+eval_interval:
+    value: 100000
+eval_max_collision_rate:
+    value: 0.01
+eval_seed:
+    value: 20000
+eval_target_success:
+    value: 0.9
+exp_name:
+    value: RM75-pose-pure-ppo-v1
+final_action_std:
+    value: 0.05
+final_learning_rate:
+    value: 3e-05
+gae_lambda:
+    value: 0.95
+gamma:
+    value: 0.99
+hf_entity:
+    value: ""
+init_from:
+    value: null
+initial_action_std:
+    value: 0.3
+learning_rate:
+    value: 0.0003
+max_grad_norm:
+    value: 0.5
+minibatch_size:
+    value: 256
+network_profile:
+    value: pose
+norm_adv:
+    value: true
+num_envs:
+    value: 8
+num_iterations:
+    value: 976
+num_minibatches:
+    value: 8
+num_steps:
+    value: 256
+orient_success_threshold_deg:
+    value: 20
+pose_feasibility_attempts:
+    value: 50
+require_pose_feasible:
+    value: true
+resume_from:
+    value: null
+save_model:
+    value: true
+seed:
+    value: 1
+target_azimuth_max_deg:
+    value: 180
+target_azimuth_min_deg:
+    value: -180
+target_direction:
+    value:
+        - 0
+        - 0
+        - -1
+target_direction_mode:
+    value: random_cone
+target_kl:
+    value: 0.008
+target_mode:
+    value: random
+target_pos:
+    value: null
+target_sampling:
+    value: uniform
+target_tilt_max_deg:
+    value: 30
+target_tilt_min_deg:
+    value: 0
+torch_deterministic:
+    value: true
+total_timesteps:
+    value: 2000000
+track:
+    value: true
+update_epochs:
+    value: 8
+upload_model:
+    value: false
+vector_env_mode:
+    value: async
+vf_coef:
+    value: 0.5
+wandb_entity:
+    value: null
+wandb_project_name:
+    value: rm75

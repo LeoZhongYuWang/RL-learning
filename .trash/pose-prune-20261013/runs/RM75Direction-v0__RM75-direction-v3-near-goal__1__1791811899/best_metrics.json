@@ -1,0 +1,13 @@
+{
+  "angle_success_rate": 1.0,
+  "collision_rate": 0.03,
+  "global_step": 1101824,
+  "mean_episode_length": 995.18,
+  "mean_final_direction_angle_deg": 87.59806732583853,
+  "mean_final_distance": 0.09802368432313509,
+  "mean_min_direction_angle_at_position_deg": 42.55240132952775,
+  "meets_acceptance": false,
+  "pose_reached_rate": 0.0,
+  "position_success_rate": 0.95,
+  "success_rate": 0.0
+}

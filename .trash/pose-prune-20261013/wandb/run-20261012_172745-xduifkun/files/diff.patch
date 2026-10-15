@@ -1,0 +1,2351 @@
+diff --git a/Algorithms/ppo_continuous_action.py b/Algorithms/ppo_continuous_action.py
+index 06baa15..3b748f0 100644
+--- a/Algorithms/ppo_continuous_action.py
++++ b/Algorithms/ppo_continuous_action.py
+@@ -1,12 +1,16 @@
+ # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
++import json
+ import os
+ import random
++import signal
++import sys
+ import time
+-from dataclasses import dataclass
++from collections import deque
++from dataclasses import asdict, dataclass
++from pathlib import Path
+ from typing import Optional, Tuple
+ 
+ import gymnasium as gym
+-import UR5  # noqa: F401  # trigger gym registration side effects
+ import numpy as np
+ import torch
+ import torch.nn as nn
+@@ -15,6 +19,44 @@ import tyro
+ from torch.distributions.normal import Normal
+ from torch.utils.tensorboard import SummaryWriter
+ 
++# Allow this file to be run directly from Algorithms/ while importing the
++# environment module located in the project root.
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++if str(PROJECT_ROOT) not in sys.path:
++    sys.path.insert(0, str(PROJECT_ROOT))
++
++from env import UR5P2PEnv
++from env_rm75 import RM75P2PEnv
++
++# Register the local environment without relying on a non-existent `UR5`
++# package.  The guard keeps repeated imports safe in the same Python process.
++if "UR5-v0" not in gym.registry:
++    gym.register(
++        id="UR5-v0",
++        entry_point=UR5P2PEnv,
++        kwargs={"render_mode": None, "target_mode": "random"},
++        max_episode_steps=None,
++    )
++
++if "RM75-v0" not in gym.registry:
++    gym.register(
++        id="RM75-v0",
++        entry_point=RM75P2PEnv,
++        kwargs={"render_mode": None, "target_mode": "random"},
++        max_episode_steps=None,
++    )
++
++if "RM75Direction-v0" not in gym.registry:
++    gym.register(
++        id="RM75Direction-v0",
++        entry_point=RM75P2PEnv,
++        kwargs={
++            "render_mode": None,
++            "target_mode": "random",
++            "require_direction": True,
++        },
++        max_episode_steps=None,
++    )
+ 
+ @dataclass
+ class Args:
+@@ -28,29 +70,35 @@ class Args:
+     """if toggled, cuda will be enabled by default"""
+     track: bool = True
+     """if toggled, this experiment will be tracked with Weights and Biases"""
+-    wandb_project_name: str = "ur5"
++    wandb_project_name: str = "rm75"
+     """the wandb's project name"""
+-    wandb_entity: str = None
++    wandb_entity: Optional[str] = None
+     """the entity (team) of wandb's project"""
+     capture_video: bool = False
+     """whether to capture videos of the agent performances (check out `videos` folder)"""
+     save_model: bool = True
+     """whether to save model into the `runs/{run_name}` folder"""
++    init_from: Optional[str] = None
++    """agent weights used to start a new fine-tuning run"""
++    resume_from: Optional[str] = None
++    """full checkpoint used to continue an interrupted run"""
++    checkpoint_interval: int = 100000
++    """environment steps between atomic full checkpoints; 0 disables periodic saves"""
+     upload_model: bool = False
+     """whether to upload the saved model to huggingface"""
+     hf_entity: str = ""
+     """the user or org name of the model repository from the Hugging Face Hub"""
+ 
+     # Algorithm specific arguments
+-    env_id: str = "UR5-v0"
++    env_id: str = "RM75-v0"
+     """the id of the environment"""
+     total_timesteps: int = 1000000
+     """total timesteps of the experiments"""
+-    learning_rate: float = 3e-4
++    learning_rate: float = 1e-4
+     """the learning rate of the optimizer"""
+     num_envs: int = 1
+     """the number of parallel game environments"""
+-    num_steps: int = 1024
++    num_steps: int = 2048
+     """the number of steps to run in each environment per policy rollout"""
+     anneal_lr: bool = True
+     """Toggle learning rate annealing for policy and value networks"""
+@@ -58,9 +106,9 @@ class Args:
+     """the discount factor gamma"""
+     gae_lambda: float = 0.95
+     """the lambda for the general advantage estimation"""
+-    num_minibatches: int = 32
++    num_minibatches: int = 16
+     """the number of mini-batches"""
+-    update_epochs: int = 10
++    update_epochs: int = 5
+     """the K epochs to update the policy"""
+     norm_adv: bool = True
+     """Toggles advantages normalization"""
+@@ -68,19 +116,39 @@ class Args:
+     """the surrogate clipping coefficient"""
+     clip_vloss: bool = True
+     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
+-    ent_coef: float = 0.01
++    ent_coef: float = 0.0001
+     """coefficient of the entropy"""
++    initial_action_std: float = 0.30
++    """initial ceiling for each normalized action standard deviation"""
++    final_action_std: float = 0.12
++    """final ceiling for each normalized action standard deviation"""
++    action_std_hold_fraction: float = 0.25
++    """fraction of training that keeps the initial action standard deviation"""
+     vf_coef: float = 0.5
+     """coefficient of the value function"""
+     max_grad_norm: float = 0.5
+     """the maximum norm for the gradient clipping"""
+-    target_kl: float = None
++    target_kl: float = 0.02
+     """the target KL divergence threshold"""
+ 
+     target_mode: str = "random"
+     """goal sampling mode passed to UR5 environment"""
+     target_pos: Optional[Tuple[float, float, float]] = None
+     """explicit goal position when target_mode=='fixed'"""
++    target_sampling: str = "uniform"
++    """random-goal sampler: uniform or hard_mixture"""
++    collision_penalty: float = 75.0
++    """RM75 collision reward penalty; collision still terminates the episode"""
++    eval_interval: int = 0
++    """environment steps between deterministic evaluations; 0 disables them"""
++    eval_episodes: int = 100
++    """number of fixed-seed episodes in each deterministic evaluation"""
++    eval_seed: int = 20000
++    """first fixed seed used by deterministic evaluation"""
++    eval_max_collision_rate: float = 0.10
++    """largest collision rate eligible for best-model selection"""
++    eval_target_success: float = 0.82
++    """success-rate target reported by deterministic evaluation"""
+ 
+     # to be filled in runtime
+     batch_size: int = 0
+@@ -111,20 +179,32 @@ class GoalAugmentWrapper(gym.ObservationWrapper):
+         else:
+             goal = np.asarray(goal, dtype=np.float32)
+         return np.concatenate([observation.astype(np.float32), goal], dtype=np.float32)
++def environment_kwargs(env_id, args: Args, *, render_mode=None):
++    """Build environment kwargs without passing RM75-only fields to UR5."""
++    kwargs = {
++        "render_mode": render_mode,
++        "target_mode": args.target_mode,
++        "target_pos": args.target_pos,
++    }
++    if env_id in {"RM75-v0", "RM75Direction-v0"}:
++        kwargs.update({
++            "target_sampling": args.target_sampling,
++            "collision_penalty": args.collision_penalty,
++        })
++    return kwargs
++
++
+ def make_env(env_id, idx, capture_video, run_name, gamma, *, args: Args):
+     def thunk():
+         env = gym.make(
+             env_id,
+-            render_mode=None,
+-            target_mode=args.target_mode,
+-            target_pos=args.target_pos,
++            **environment_kwargs(env_id, args, render_mode=None),
+         )
+         if capture_video and idx == 0 and "rgb_array" in getattr(env, "metadata", {}).get("render_modes", []):
+             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+         # NOTE: GoalAugmentWrapper removed because env.py already includes goal in observation
+         # env = GoalAugmentWrapper(env)
+         env = gym.wrappers.RecordEpisodeStatistics(env)
+-        env = gym.wrappers.ClipAction(env)
+         return env
+ 
+     return thunk
+@@ -136,48 +216,628 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+     return layer
+ 
+ 
++def compute_action_std(
++    initial_action_std,
++    final_action_std,
++    iteration,
++    num_iterations,
++    hold_fraction,
++):
++    """Hold exploration, then linearly decay it to the final value."""
++    if num_iterations < 1:
++        raise ValueError("num_iterations must be at least 1")
++    if iteration < 1 or iteration > num_iterations:
++        raise ValueError("iteration must be within [1, num_iterations]")
++    if not 0.0 <= hold_fraction < 1.0:
++        raise ValueError("hold_fraction must be within [0, 1)")
++
++    training_progress = (iteration - 1.0) / max(
++        num_iterations - 1,
++        1,
++    )
++    if training_progress <= hold_fraction:
++        return float(initial_action_std)
++
++    decay_progress = (
++        (training_progress - hold_fraction)
++        / (1.0 - hold_fraction)
++    )
++    return float(
++        initial_action_std
++        + decay_progress * (final_action_std - initial_action_std)
++    )
++
++
+ class Agent(nn.Module):
+-    def __init__(self, envs):
++    def __init__(self, envs, initial_action_std=0.30):
+         super().__init__()
++        if initial_action_std <= 0.0:
++            raise ValueError("initial_action_std must be positive")
++        observation_space = getattr(
++            envs,
++            "single_observation_space",
++            envs.observation_space,
++        )
++        action_space = getattr(
++            envs,
++            "single_action_space",
++            envs.action_space,
++        )
++        action_dim = int(np.prod(action_space.shape))
+         self.critic = nn.Sequential(
+-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
++            layer_init(nn.Linear(np.array(observation_space.shape).prod(), 64)),
+             nn.Tanh(),
+             layer_init(nn.Linear(64, 64)),
+             nn.Tanh(),
+             layer_init(nn.Linear(64, 1), std=1.0),
+         )
+         self.actor_mean = nn.Sequential(
+-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
++            layer_init(nn.Linear(np.array(observation_space.shape).prod(), 64)),
+             nn.Tanh(),
+             layer_init(nn.Linear(64, 64)),
+             nn.Tanh(),
+-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
++            layer_init(nn.Linear(64, action_dim), std=0.01),
+         )
+-        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
++        # The environment accepts normalized actions in [-1, 1]. Start with a
++        # moderate standard deviation and squash every Gaussian sample with
++        # tanh so the action used for PPO is exactly the action sent to MuJoCo.
++        self.actor_logstd = nn.Parameter(
++            torch.full(
++                (1, action_dim),
++                float(np.log(initial_action_std)),
++            )
++        )
++        self.register_buffer(
++            "action_logstd_ceiling",
++            torch.tensor(
++                [[float(np.log(initial_action_std))]],
++                dtype=torch.float32,
++            ),
++            persistent=False,
++        )
++
++    def set_action_std_ceiling(self, action_std):
++        """Set the maximum exploration standard deviation for all joints."""
++        if not np.isfinite(action_std) or action_std <= 0.0:
++            raise ValueError("action_std must be finite and positive")
++        logstd_ceiling = float(np.log(action_std))
++        with torch.no_grad():
++            self.action_logstd_ceiling.fill_(logstd_ceiling)
++            self.actor_logstd.clamp_(max=logstd_ceiling)
++
++    def _effective_action_logstd(self, action_mean):
++        learned_logstd = torch.minimum(
++            self.actor_logstd,
++            self.action_logstd_ceiling,
++        )
++        learned_logstd = torch.clamp(
++            learned_logstd,
++            min=float(np.log(0.05)),
++        )
++        return learned_logstd.expand_as(action_mean)
+ 
+     def get_value(self, x):
+         return self.critic(x)
+ 
+     def get_action_and_value(self, x, action=None):
+         action_mean = self.actor_mean(x)
+-        action_logstd = self.actor_logstd.expand_as(action_mean)
++        # The parameter may learn a smaller variance, but the scheduled
++        # ceiling prevents exploration from re-expanding late in training.
++        action_logstd = self._effective_action_logstd(action_mean)
+         action_std = torch.exp(action_logstd)
+         probs = Normal(action_mean, action_std)
++
+         if action is None:
+-            action = probs.sample()
+-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
++            raw_action = probs.rsample()
++            action = torch.tanh(raw_action)
++        else:
++            # atanh is the inverse of tanh. Clamping only protects the
++            # logarithm/inverse from exact floating-point boundary values.
++            action = torch.clamp(action, -1.0 + 1e-6, 1.0 - 1e-6)
++            raw_action = torch.atanh(action)
++
++        # Change-of-variables correction for a tanh-squashed Gaussian.
++        logprob = probs.log_prob(raw_action) - torch.log(
++            1.0 - action.pow(2) + 1e-6
++        )
++        logprob = logprob.sum(1)
++
++        # The base-Gaussian entropy is a stable exploration diagnostic. The
++        # policy likelihood above still uses the exact squashed log-probability.
++        entropy = probs.entropy().sum(1)
++        return action, logprob, entropy, self.critic(x)
++
++
++CHECKPOINT_FORMAT_VERSION = 1
++
++
++def resolve_training_path(path_value):
++    """Resolve a model/checkpoint path from cwd or the project root."""
++    candidate = Path(path_value).expanduser()
++    if candidate.is_file():
++        return candidate.resolve()
++    project_candidate = PROJECT_ROOT / candidate
++    if project_candidate.is_file():
++        return project_candidate.resolve()
++    raise FileNotFoundError(f"Training file does not exist: {path_value}")
++
++
++def _torch_load(path, device):
++    try:
++        return torch.load(
++            path,
++            map_location=device,
++            weights_only=True,
++        )
++    except TypeError:
++        return torch.load(path, map_location=device)
++
++
++def _is_full_training_checkpoint(payload):
++    return (
++        isinstance(payload, dict)
++        and payload.get("format_version") == CHECKPOINT_FORMAT_VERSION
++        and "agent_state_dict" in payload
++        and "optimizer_state_dict" in payload
++    )
++
++
++def load_agent_weights(path, agent, device):
++    """Load legacy weights or only the Agent part of a full checkpoint."""
++    payload = _torch_load(resolve_training_path(path), device)
++    if _is_full_training_checkpoint(payload):
++        state_dict = payload["agent_state_dict"]
++        source_kind = "full_checkpoint_weights"
++    elif isinstance(payload, dict) and "agent_state_dict" in payload:
++        state_dict = payload["agent_state_dict"]
++        source_kind = "wrapped_weights"
++    else:
++        state_dict = payload
++        source_kind = "legacy_weights"
++    target_state = agent.state_dict()
++    source_obs_dim = int(state_dict["actor_mean.0.weight"].shape[1])
++    target_obs_dim = int(target_state["actor_mean.0.weight"].shape[1])
++    if source_obs_dim == target_obs_dim:
++        agent.load_state_dict(state_dict, strict=True)
++    elif source_obs_dim == 28 and target_obs_dim == 31:
++        # Preserve the validated 28-D point-reaching policy. The three new
++        # direction-error inputs start with zero influence and are learned by
++        # fine-tuning; every other compatible parameter is copied exactly.
++        expanded_state = {}
++        expandable_keys = {
++            "actor_mean.0.weight",
++            "critic.0.weight",
++        }
++        for key, target_value in target_state.items():
++            if key not in state_dict:
++                raise ValueError(f"initialization is missing parameter {key}")
++            source_value = state_dict[key]
++            if key in expandable_keys:
++                if (
++                    source_value.shape[0] != target_value.shape[0]
++                    or source_value.shape[1] != 28
++                    or target_value.shape[1] != 31
++                ):
++                    raise ValueError(
++                        f"unsupported input-layer shapes for {key}: "
++                        f"{tuple(source_value.shape)} -> {tuple(target_value.shape)}"
++                    )
++                expanded = torch.zeros_like(target_value)
++                expanded[:, :28] = source_value.to(
++                    device=expanded.device,
++                    dtype=expanded.dtype,
++                )
++                expanded_state[key] = expanded
++            elif source_value.shape == target_value.shape:
++                expanded_state[key] = source_value
++            else:
++                raise ValueError(
++                    f"unsupported parameter shape for {key}: "
++                    f"{tuple(source_value.shape)} -> {tuple(target_value.shape)}"
++                )
++        agent.load_state_dict(expanded_state, strict=True)
++        source_kind += "_expanded_28_to_31"
++    else:
++        raise ValueError(
++            "unsupported observation-size transfer: "
++            f"{source_obs_dim} -> {target_obs_dim}"
++        )
++    return source_kind
++
++
++def _capture_numpy_random_state():
++    name, keys, position, has_gauss, cached_gaussian = np.random.get_state()
++    return {
++        "name": name,
++        "keys": torch.as_tensor(keys.astype(np.int64)),
++        "position": int(position),
++        "has_gauss": int(has_gauss),
++        "cached_gaussian": float(cached_gaussian),
++    }
++
++
++def _restore_numpy_random_state(state):
++    keys = state["keys"].cpu().numpy().astype(np.uint32)
++    np.random.set_state((
++        state["name"],
++        keys,
++        int(state["position"]),
++        int(state["has_gauss"]),
++        float(state["cached_gaussian"]),
++    ))
++
++
++def save_training_checkpoint(
++    path,
++    agent,
++    optimizer,
++    *,
++    global_step,
++    completed_iteration,
++    args,
++    run_name,
++    wandb_run_id=None,
++    best_eval_metrics=None,
++):
++    """Atomically save the state needed to continue a PPO run."""
++    checkpoint_path = Path(path)
++    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
++    temporary_path = checkpoint_path.with_suffix(
++        checkpoint_path.suffix + ".tmp"
++    )
++    agent_device = next(agent.parameters()).device
++    payload = {
++        "format_version": CHECKPOINT_FORMAT_VERSION,
++        "agent_state_dict": agent.state_dict(),
++        "optimizer_state_dict": optimizer.state_dict(),
++        "global_step": int(global_step),
++        "completed_iteration": int(completed_iteration),
++        "args": asdict(args),
++        "run_name": str(run_name),
++        "wandb_run_id": wandb_run_id,
++        "best_eval_metrics": best_eval_metrics,
++        "python_random_state": random.getstate(),
++        "numpy_random_state": _capture_numpy_random_state(),
++        "torch_random_state": torch.get_rng_state(),
++        "cuda_random_state": (
++            torch.cuda.get_rng_state_all()
++            if agent_device.type == "cuda"
++            else None
++        ),
++    }
++    try:
++        torch.save(payload, temporary_path)
++        os.replace(temporary_path, checkpoint_path)
++    finally:
++        if temporary_path.exists():
++            temporary_path.unlink()
++    return checkpoint_path
++
++
++def load_training_checkpoint(path, agent, optimizer, device):
++    """Restore Agent, optimizer, counters, configuration, and RNG state."""
++    checkpoint_path = resolve_training_path(path)
++    payload = _torch_load(checkpoint_path, device)
++    if not _is_full_training_checkpoint(payload):
++        raise ValueError(
++            "--resume-from requires a versioned full training checkpoint; "
++            "use --init-from for legacy .cleanrl_model weights"
++        )
++
++    agent.load_state_dict(payload["agent_state_dict"], strict=True)
++    optimizer.load_state_dict(payload["optimizer_state_dict"])
++    random.setstate(payload["python_random_state"])
++    _restore_numpy_random_state(payload["numpy_random_state"])
++    torch.set_rng_state(payload["torch_random_state"].cpu())
++    cuda_state = payload.get("cuda_random_state")
++    if cuda_state is not None and torch.cuda.is_available():
++        torch.cuda.set_rng_state_all(cuda_state)
++    return payload
++
++
++def next_checkpoint_step(global_step, checkpoint_interval):
++    """Return the next strict checkpoint boundary, or None if disabled."""
++    if checkpoint_interval <= 0:
++        return None
++    return (
++        (int(global_step) // int(checkpoint_interval)) + 1
++    ) * int(checkpoint_interval)
++
++
++def should_update_best(
++    metrics,
++    best_metrics,
++    max_collision_rate,
++):
++    """Rank evaluation results by success, safety, then final distance."""
++    if metrics["collision_rate"] > max_collision_rate:
++        return False
++    if best_metrics is None:
++        return True
++    candidate_rank = (
++        metrics["success_rate"],
++        -metrics["collision_rate"],
++        -metrics["mean_final_distance"],
++        -metrics.get("mean_final_direction_angle_deg", 0.0),
++    )
++    best_rank = (
++        best_metrics["success_rate"],
++        -best_metrics["collision_rate"],
++        -best_metrics["mean_final_distance"],
++        -best_metrics.get("mean_final_direction_angle_deg", 0.0),
++    )
++    return candidate_rank > best_rank
++
++
++@torch.no_grad()
++def evaluate_policy(agent, args, device):
++    """Evaluate deterministic mean actions on a fixed sequence of seeds."""
++    eval_env = gym.make(
++        args.env_id,
++        **environment_kwargs(args.env_id, args, render_mode=None),
++    )
++    successes = []
++    collisions = []
++    final_distances = []
++    final_direction_angles = []
++    position_successes = []
++    direction_successes = []
++    episode_lengths = []
++    was_training = agent.training
++    agent.eval()
++    try:
++        horizon = int(getattr(eval_env.unwrapped, "horizon", 1024))
++        for episode in range(args.eval_episodes):
++            observation, _ = eval_env.reset(
++                seed=args.eval_seed + episode
++            )
++            info = {}
++            step = 0
++            for step in range(1, horizon + 1):
++                observation_tensor = torch.as_tensor(
++                    observation[None, :],
++                    dtype=torch.float32,
++                    device=device,
++                )
++                action = torch.tanh(
++                    agent.actor_mean(observation_tensor)
++                )[0].cpu().numpy()
++                observation, _, terminated, truncated, info = (
++                    eval_env.step(action)
++                )
++                if terminated or truncated:
++                    break
++            successes.append(float(bool(info.get("success", False))))
++            collisions.append(float(bool(info.get("collision", False))))
++            final_distances.append(float(info.get("dist", np.nan)))
++            direction_angle = info.get("direction_angle_deg", np.nan)
++            final_direction_angles.append(
++                np.nan if direction_angle is None else float(direction_angle)
++            )
++            position_successes.append(float(bool(
++                info.get(
++                    "position_reached",
++                    info.get("position_success", info.get("success", False)),
++                )
++            )))
++            direction_successes.append(float(bool(
++                info.get(
++                    "direction_reached",
++                    info.get("direction_success", True),
++                )
++            )))
++            episode_lengths.append(float(step))
++    finally:
++        eval_env.close()
++        agent.train(was_training)
++
++    return {
++        "success_rate": float(np.mean(successes)),
++        "collision_rate": float(np.mean(collisions)),
++        "mean_final_distance": float(np.mean(final_distances)),
++        "mean_final_direction_angle_deg": float(
++            np.nanmean(final_direction_angles)
++            if not np.all(np.isnan(final_direction_angles))
++            else 0.0
++        ),
++        "position_success_rate": float(np.mean(position_successes)),
++        "direction_success_rate": float(np.mean(direction_successes)),
++        "mean_episode_length": float(np.mean(episode_lengths)),
++    }
++
++
++def save_best_metrics(path, metrics):
++    """Atomically save human-readable best-model evaluation metadata."""
++    metrics_path = Path(path)
++    metrics_path.parent.mkdir(parents=True, exist_ok=True)
++    temporary_path = metrics_path.with_suffix(
++        metrics_path.suffix + ".tmp"
++    )
++    temporary_path.write_text(
++        json.dumps(metrics, indent=2, sort_keys=True),
++        encoding="utf-8",
++    )
++    os.replace(temporary_path, metrics_path)
++    return metrics_path
++
++
++def evaluate_and_maybe_save_best(
++    agent,
++    args,
++    device,
++    writer,
++    *,
++    global_step,
++    best_metrics,
++    best_model_path,
++    best_metrics_path,
++):
++    """Log fixed-seed evaluation and persist a better eligible model."""
++    metrics = evaluate_policy(agent, args, device)
++    metrics["global_step"] = int(global_step)
++    metrics["meets_acceptance"] = bool(
++        metrics["success_rate"] >= args.eval_target_success
++        and metrics["collision_rate"]
++        <= args.eval_max_collision_rate
++    )
++    for metric_name, value in metrics.items():
++        writer.add_scalar(
++            f"eval/{metric_name}",
++            float(value),
++            global_step,
++        )
++
++    print(
++        "Fixed-seed evaluation: "
++        f"success={metrics['success_rate']:.3f}, "
++        f"collision={metrics['collision_rate']:.3f}, "
++        f"final_dist={metrics['mean_final_distance']:.4f}, "
++        f"direction_deg={metrics['mean_final_direction_angle_deg']:.2f}, "
++        f"steps={metrics['mean_episode_length']:.1f}, "
++        f"acceptance={metrics['meets_acceptance']}"
++    )
++    if not should_update_best(
++        metrics,
++        best_metrics,
++        args.eval_max_collision_rate,
++    ):
++        return best_metrics, False
++
++    if args.save_model:
++        torch.save(agent.state_dict(), best_model_path)
++        save_best_metrics(best_metrics_path, metrics)
++        print(f"new best model saved to {best_model_path}")
++    return metrics, True
++
++
++RESUME_CONFIG_FIELDS = (
++    "seed",
++    "torch_deterministic",
++    "track",
++    "wandb_project_name",
++    "wandb_entity",
++    "capture_video",
++    "save_model",
++    "checkpoint_interval",
++    "env_id",
++    "total_timesteps",
++    "learning_rate",
++    "num_envs",
++    "num_steps",
++    "anneal_lr",
++    "gamma",
++    "gae_lambda",
++    "num_minibatches",
++    "update_epochs",
++    "norm_adv",
++    "clip_coef",
++    "clip_vloss",
++    "ent_coef",
++    "initial_action_std",
++    "final_action_std",
++    "action_std_hold_fraction",
++    "vf_coef",
++    "max_grad_norm",
++    "target_kl",
++    "target_mode",
++    "target_pos",
++    "target_sampling",
++    "collision_penalty",
++    "eval_interval",
++    "eval_episodes",
++    "eval_seed",
++    "eval_max_collision_rate",
++    "eval_target_success",
++)
++
++
++def apply_resume_configuration(args, checkpoint_payload):
++    """Restore optimization-critical arguments while keeping runtime choices."""
++    saved_args = checkpoint_payload["args"]
++    for field_name in RESUME_CONFIG_FIELDS:
++        if field_name in saved_args:
++            setattr(args, field_name, saved_args[field_name])
++    return args
+ 
+ 
+ if __name__ == "__main__":
+     args = tyro.cli(Args)
++    if args.init_from is not None and args.resume_from is not None:
++        raise ValueError(
++            "--init-from and --resume-from are mutually exclusive"
++        )
++    if args.checkpoint_interval < 0:
++        raise ValueError("checkpoint_interval must be non-negative")
++    if args.collision_penalty < 0.0:
++        raise ValueError("collision_penalty must be non-negative")
++    if args.eval_interval < 0:
++        raise ValueError("eval_interval must be non-negative")
++    if args.eval_episodes <= 0:
++        raise ValueError("eval_episodes must be positive")
++    if not 0.0 <= args.eval_max_collision_rate <= 1.0:
++        raise ValueError(
++            "eval_max_collision_rate must be within [0, 1]"
++        )
++    if not 0.0 <= args.eval_target_success <= 1.0:
++        raise ValueError("eval_target_success must be within [0, 1]")
++
++    resume_preview = None
++    resume_path = None
++    if args.resume_from is not None:
++        resume_path = resolve_training_path(args.resume_from)
++        resume_preview = _torch_load(resume_path, "cpu")
++        if not _is_full_training_checkpoint(resume_preview):
++            raise ValueError(
++                "--resume-from requires checkpoint_latest.pt; "
++                "use --init-from for legacy .cleanrl_model weights"
++            )
++        apply_resume_configuration(args, resume_preview)
++
+     args.batch_size = int(args.num_envs * args.num_steps)
+     args.minibatch_size = int(args.batch_size // args.num_minibatches)
+     args.num_iterations = args.total_timesteps // args.batch_size
+-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
++    if not (
++        args.initial_action_std >= args.final_action_std > 0.0
++    ):
++        raise ValueError(
++            "action std schedule requires "
++            "initial_action_std >= final_action_std > 0"
++        )
++    if not 0.0 <= args.action_std_hold_fraction < 1.0:
++        raise ValueError(
++            "action_std_hold_fraction must be within [0, 1)"
++        )
++    if args.num_iterations < 1:
++        raise ValueError(
++            "total_timesteps must contain at least one complete PPO batch"
++        )
++
++    if resume_preview is None:
++        run_name = (
++            f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
++        )
++        run_directory = PROJECT_ROOT / "runs" / run_name
++        resume_global_step = 0
++    else:
++        if resume_path.parent.name == "checkpoints":
++            run_directory = resume_path.parent.parent
++            run_name = run_directory.name
++        else:
++            run_name = resume_preview["run_name"]
++            run_directory = PROJECT_ROOT / "runs" / run_name
++        resume_global_step = int(resume_preview["global_step"])
++
++    wandb_run = None
+     if args.track:
+         import wandb
+ 
+-        wandb.init(
++        wandb_kwargs = {}
++        if resume_preview is not None and resume_preview.get("wandb_run_id"):
++            wandb_kwargs.update({
++                "id": resume_preview["wandb_run_id"],
++                "resume": "allow",
++            })
++        wandb_run = wandb.init(
+             project=args.wandb_project_name,
+             entity=args.wandb_entity,
+             sync_tensorboard=True,
+@@ -185,8 +845,12 @@ if __name__ == "__main__":
+             name=run_name,
+             monitor_gym=True,
+             save_code=True,
++            **wandb_kwargs,
+         )
+-    writer = SummaryWriter(f"runs/{run_name}")
++    writer = SummaryWriter(
++        str(run_directory),
++        purge_step=(resume_global_step if resume_preview is not None else None),
++    )
+     writer.add_text(
+         "hyperparameters",
+         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+@@ -206,9 +870,46 @@ if __name__ == "__main__":
+     )
+     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+ 
+-    agent = Agent(envs).to(device)
++    agent = Agent(
++        envs,
++        initial_action_std=args.initial_action_std,
++    ).to(device)
+     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+ 
++    global_step = 0
++    completed_iteration = 0
++    start_iteration = 1
++    if args.init_from is not None:
++        source_kind = load_agent_weights(
++            args.init_from,
++            agent,
++            device,
++        )
++        print(
++            f"Fine-tune initialization loaded ({source_kind}): "
++            f"{resolve_training_path(args.init_from)}"
++        )
++    elif resume_path is not None:
++        resume_payload = load_training_checkpoint(
++            resume_path,
++            agent,
++            optimizer,
++            device,
++        )
++        global_step = int(resume_payload["global_step"])
++        completed_iteration = int(
++            resume_payload["completed_iteration"]
++        )
++        start_iteration = completed_iteration + 1
++        if completed_iteration > args.num_iterations:
++            raise ValueError(
++                "checkpoint iteration exceeds the saved training plan"
++            )
++        print(
++            f"Resuming run {run_name} from global_step={global_step}, "
++            f"next_iteration={start_iteration}/{args.num_iterations}"
++        )
++
+     # ALGO Logic: Storage setup
+     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
+     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
+@@ -218,16 +919,72 @@ if __name__ == "__main__":
+     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+ 
+     # TRY NOT TO MODIFY: start the game
+-    global_step = 0
+     start_time = time.time()
+-    next_obs, _ = envs.reset(seed=args.seed)
++    session_start_step = global_step
++    reset_seed = args.seed + completed_iteration
++    next_obs, _ = envs.reset(seed=reset_seed)
+     next_obs = torch.as_tensor(next_obs, dtype=torch.float32, device=device)
+     next_done = torch.zeros(args.num_envs).to(device)
+ 
+-    successful_episodes = 0
+     finished_episodes = 0
++    recent_successes = deque(maxlen=100)
++    recent_collisions = deque(maxlen=100)
++    recent_position_successes = deque(maxlen=100)
++    recent_direction_successes = deque(maxlen=100)
++    recent_region_successes = {
++        "uniform": deque(maxlen=100),
++        "hard_negative_y": deque(maxlen=100),
++        "hard_far_x": deque(maxlen=100),
++        "fixed": deque(maxlen=100),
++    }
++
++    latest_checkpoint_path = (
++        run_directory / "checkpoints" / "checkpoint_latest.pt"
++    )
++    best_model_path = (
++        run_directory / f"{args.exp_name}.best.cleanrl_model"
++    )
++    best_metrics_path = run_directory / "best_metrics.json"
++    best_eval_metrics = (
++        resume_preview.get("best_eval_metrics")
++        if resume_preview is not None
++        else None
++    )
++    next_save_step = next_checkpoint_step(
++        global_step,
++        args.checkpoint_interval,
++    )
++    next_eval_step = next_checkpoint_step(
++        global_step,
++        args.eval_interval,
++    )
++    last_eval_step = None
++    stop_requested = {"value": False}
++
++    def request_graceful_stop(signum, frame):
++        del signum, frame
++        if stop_requested["value"]:
++            return
++        stop_requested["value"] = True
++        print(
++            "\nCtrl+C received: finishing the current PPO iteration, "
++            "then saving checkpoint_latest.pt."
++        )
++
++    previous_sigint_handler = signal.getsignal(signal.SIGINT)
++    signal.signal(signal.SIGINT, request_graceful_stop)
++    interrupted = False
++
++    for iteration in range(start_iteration, args.num_iterations + 1):
++        scheduled_action_std = compute_action_std(
++            initial_action_std=args.initial_action_std,
++            final_action_std=args.final_action_std,
++            iteration=iteration,
++            num_iterations=args.num_iterations,
++            hold_fraction=args.action_std_hold_fraction,
++        )
++        agent.set_action_std_ceiling(scheduled_action_std)
+ 
+-    for iteration in range(1, args.num_iterations + 1):
+         # Annealing the rate if instructed to do so.
+         if args.anneal_lr:
+             frac = 1.0 - (iteration - 1.0) / args.num_iterations
+@@ -253,18 +1010,158 @@ if __name__ == "__main__":
+             next_obs = torch.as_tensor(next_obs, dtype=torch.float32, device=device)
+             next_done = torch.as_tensor(next_done.astype(np.float32), dtype=torch.float32, device=device)
+ 
+-            if "final_info" in infos:
+-                for info in infos["final_info"]:
+-                    if info and "episode" in info:
+-                        finished_episodes += 1
+-                        success = float(info.get("success", False))
+-                        successful_episodes += success
++            # Gymnasium 1.3.x puts completed episode data directly in infos.
++            if "episode" in infos:
++                episode_mask = infos.get(
++                    "_episode",
++                    np.ones(args.num_envs, dtype=bool),
++                )
++
++                for env_idx in np.flatnonzero(episode_mask):
++                    episode_return = float(
++                        infos["episode"]["r"][env_idx]
++                    )
++                    episode_length = int(
++                        infos["episode"]["l"][env_idx]
++                    )
++
++                    success = float(
++                        infos.get(
++                            "success",
++                            np.zeros(args.num_envs),
++                        )[env_idx]
++                    )
++
++                    collision = float(
++                        infos.get(
++                            "collision",
++                            np.zeros(args.num_envs),
++                        )[env_idx]
++                    )
++
++                    timeout = float(
++                        infos.get(
++                            "timeout",
++                            np.zeros(args.num_envs),
++                        )[env_idx]
++                    )
++
++                    final_dist = float(
++                        infos.get(
++                            "dist",
++                            np.full(args.num_envs, np.nan),
++                        )[env_idx]
++                    )
++                    position_success = float(
++                        infos.get(
++                            "position_reached",
++                            infos.get(
++                                "position_success",
++                                infos.get(
++                                    "success",
++                                    np.zeros(args.num_envs),
++                                ),
++                            ),
++                        )[env_idx]
++                    )
++                    direction_success = float(
++                        infos.get(
++                            "direction_reached",
++                            infos.get(
++                                "direction_success",
++                                np.ones(args.num_envs),
++                            ),
++                        )[env_idx]
++                    )
++                    direction_angle_deg = infos.get(
++                        "direction_angle_deg",
++                        np.full(args.num_envs, np.nan),
++                    )[env_idx]
++                    direction_angle_deg = (
++                        np.nan
++                        if direction_angle_deg is None
++                        else float(direction_angle_deg)
++                    )
++                    target_region = str(
++                        infos.get(
++                            "target_region",
++                            np.full(
++                                args.num_envs,
++                                "unknown",
++                                dtype=object,
++                            ),
++                        )[env_idx]
++                    )
++
++                    finished_episodes += 1
++                    recent_successes.append(success)
++                    recent_collisions.append(collision)
++                    recent_position_successes.append(position_success)
++                    recent_direction_successes.append(direction_success)
++                    if target_region in recent_region_successes:
++                        recent_region_successes[target_region].append(
++                            success
++                        )
++
++                    if finished_episodes % 10 == 0 or success:
+                         print(
+-                            f"global_step={global_step}, episodic_return={info['episode']['r']}, success={bool(success)}"
++                            f"global_step={global_step}, "
++                            f"episodic_return={episode_return:.3f}, "
++                            f"episodic_length={episode_length}, "
++                            f"success={bool(success)}, "
++                            f"collision={bool(collision)}, "
++                            f"timeout={bool(timeout)}, "
++                            f"target_region={target_region}, "
++                            f"final_dist={final_dist:.4f}, "
++                            f"direction_deg={direction_angle_deg:.2f}"
++                        )
++
++                    writer.add_scalar(
++                        "charts/episodic_return",
++                        episode_return,
++                        global_step,
++                    )
++                    writer.add_scalar(
++                        "charts/episodic_length",
++                        episode_length,
++                        global_step,
++                    )
++                    writer.add_scalar(
++                        "charts/episodic_success",
++                        success,
++                        global_step,
++                    )
++                    writer.add_scalar(
++                        "charts/collision",
++                        collision,
++                        global_step,
++                    )
++                    writer.add_scalar(
++                        "charts/timeout",
++                        timeout,
++                        global_step,
++                    )
++                    writer.add_scalar(
++                        "charts/final_distance",
++                        final_dist,
++                        global_step,
++                    )
++                    if np.isfinite(direction_angle_deg):
++                        writer.add_scalar(
++                            "charts/final_direction_angle_deg",
++                            direction_angle_deg,
++                            global_step,
+                         )
+-                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+-                        writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+-                        writer.add_scalar("charts/episodic_success", success, global_step)
++                    writer.add_scalar(
++                        "charts/position_success",
++                        position_success,
++                        global_step,
++                    )
++                    writer.add_scalar(
++                        "charts/direction_success",
++                        direction_success,
++                        global_step,
++                    )
+ 
+         # bootstrap value if not done
+         with torch.no_grad():
+@@ -350,6 +1247,11 @@ if __name__ == "__main__":
+ 
+         # TRY NOT TO MODIFY: record rewards for plotting purposes
+         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
++        writer.add_scalar(
++            "charts/action_std_ceiling",
++            scheduled_action_std,
++            global_step,
++        )
+         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
+         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
+@@ -357,40 +1259,200 @@ if __name__ == "__main__":
+         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
+         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
+         writer.add_scalar("losses/explained_variance", explained_var, global_step)
+-        print("SPS:", int(global_step / (time.time() - start_time)))
+-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+-        if finished_episodes > 0:
+-            success_rate = successful_episodes / finished_episodes
+-            print(f"Success rate: {success_rate:.3f}")
+-            writer.add_scalar("charts/success_rate", success_rate, global_step)
+-            if args.track:
+-                import wandb
++        action_saturation_rate = float(
++            (actions.abs() > 0.98).float().mean().item()
++        )
++        writer.add_scalar(
++            "charts/action_saturation_rate",
++            action_saturation_rate,
++            global_step,
++        )
++        session_steps = global_step - session_start_step
++        sps = int(session_steps / max(time.time() - start_time, 1e-6))
++        print("SPS:", sps)
++        writer.add_scalar("charts/SPS", sps, global_step)
++        if recent_successes:
++            success_rate = float(np.mean(recent_successes))
++            collision_rate = float(np.mean(recent_collisions))
++            print(
++                "Recent-100 success/collision rate: "
++                f"{success_rate:.3f}/{collision_rate:.3f}"
++            )
++            writer.add_scalar(
++                "charts/success_rate",
++                success_rate,
++                global_step,
++            )
++            writer.add_scalar(
++                "charts/collision_rate",
++                collision_rate,
++                global_step,
++            )
++            writer.add_scalar(
++                "charts/position_success_rate",
++                float(np.mean(recent_position_successes)),
++                global_step,
++            )
++            writer.add_scalar(
++                "charts/direction_success_rate",
++                float(np.mean(recent_direction_successes)),
++                global_step,
++            )
+ 
+-                wandb.log({"charts/success_rate": success_rate}, step=global_step)
++        for region, outcomes in recent_region_successes.items():
++            if outcomes:
++                writer.add_scalar(
++                    f"charts/region_success_rate/{region}",
++                    float(np.mean(outcomes)),
++                    global_step,
++                )
+ 
+-    if args.save_model:
+-        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
++        completed_iteration = iteration
++        if (
++            not stop_requested["value"]
++            and next_eval_step is not None
++            and global_step >= next_eval_step
++        ):
++            best_eval_metrics, _ = evaluate_and_maybe_save_best(
++                agent,
++                args,
++                device,
++                writer,
++                global_step=global_step,
++                best_metrics=best_eval_metrics,
++                best_model_path=best_model_path,
++                best_metrics_path=best_metrics_path,
++            )
++            last_eval_step = global_step
++            next_eval_step = next_checkpoint_step(
++                global_step,
++                args.eval_interval,
++            )
++
++        if (
++            args.save_model
++            and next_save_step is not None
++            and global_step >= next_save_step
++        ):
++            save_training_checkpoint(
++                latest_checkpoint_path,
++                agent,
++                optimizer,
++                global_step=global_step,
++                completed_iteration=completed_iteration,
++                args=args,
++                run_name=run_name,
++                wandb_run_id=(
++                    wandb_run.id if wandb_run is not None else None
++                ),
++                best_eval_metrics=best_eval_metrics,
++            )
++            print(f"checkpoint saved to {latest_checkpoint_path}")
++            next_save_step = next_checkpoint_step(
++                global_step,
++                args.checkpoint_interval,
++            )
++
++        if stop_requested["value"]:
++            interrupted = True
++            if args.save_model:
++                save_training_checkpoint(
++                    latest_checkpoint_path,
++                    agent,
++                    optimizer,
++                    global_step=global_step,
++                    completed_iteration=completed_iteration,
++                    args=args,
++                    run_name=run_name,
++                    wandb_run_id=(
++                        wandb_run.id if wandb_run is not None else None
++                    ),
++                    best_eval_metrics=best_eval_metrics,
++                )
++                print(
++                    "graceful-stop checkpoint saved to "
++                    f"{latest_checkpoint_path}"
++                )
++            break
++
++    signal.signal(signal.SIGINT, previous_sigint_handler)
++
++    if (
++        not interrupted
++        and args.eval_interval > 0
++        and last_eval_step != global_step
++    ):
++        best_eval_metrics, _ = evaluate_and_maybe_save_best(
++            agent,
++            args,
++            device,
++            writer,
++            global_step=global_step,
++            best_metrics=best_eval_metrics,
++            best_model_path=best_model_path,
++            best_metrics_path=best_metrics_path,
++        )
++        last_eval_step = global_step
++
++    if interrupted:
++        resume_device_flag = " --no-cuda" if not args.cuda else ""
++        print(
++            "Training stopped safely. Resume with:\n"
++            ".venv/bin/python Algorithms/ppo_continuous_action.py "
++            f"--resume-from {latest_checkpoint_path}"
++            f"{resume_device_flag}"
++        )
++    elif args.save_model:
++        # Persist the final effective exploration scale through the existing
++        # actor_logstd parameter without adding a new checkpoint key.
++        agent.set_action_std_ceiling(args.final_action_std)
++        model_path = run_directory / f"{args.exp_name}.cleanrl_model"
+         torch.save(agent.state_dict(), model_path)
+         print(f"model saved to {model_path}")
+-        from cleanrl.cleanrl_utils.evals.ppo_eval import evaluate
+-
+-        episodic_returns = evaluate(
+-            model_path,
+-            lambda env_id, idx, capture_video, run_name, gamma: make_env(
+-                env_id, idx, capture_video, run_name, gamma, args=args
++        save_training_checkpoint(
++            latest_checkpoint_path,
++            agent,
++            optimizer,
++            global_step=global_step,
++            completed_iteration=completed_iteration,
++            args=args,
++            run_name=run_name,
++            wandb_run_id=(
++                wandb_run.id if wandb_run is not None else None
+             ),
+-            args.env_id,
+-            eval_episodes=10,
+-            run_name=f"{run_name}-eval",
+-            Model=Agent,
+-            device=device,
+-            capture_video=False,
+-            gamma=args.gamma,
++            best_eval_metrics=best_eval_metrics,
+         )
+-        for idx, episodic_return in enumerate(episodic_returns):
+-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
++        print(f"final checkpoint saved to {latest_checkpoint_path}")
++        try:
++            from cleanrl_utils.evals.ppo_eval import evaluate
++        except ModuleNotFoundError:
++            evaluate = None
++            print(
++                "CleanRL evaluation helper is not installed; "
++                "the model was saved successfully and automatic evaluation was skipped."
++            )
++
++        episodic_returns = []
++        if evaluate is not None:
++            episodic_returns = evaluate(
++                model_path,
++                lambda env_id, idx, capture_video, run_name, gamma: make_env(
++                    env_id, idx, capture_video, run_name, gamma, args=args
++                ),
++                args.env_id,
++                eval_episodes=10,
++                run_name=f"{run_name}-eval",
++                Model=Agent,
++                device=device,
++                capture_video=False,
++                gamma=args.gamma,
++            )
++            for idx, episodic_return in enumerate(episodic_returns):
++                writer.add_scalar("eval/episodic_return", episodic_return, idx)
+ 
+         if args.upload_model:
++            if evaluate is None:
++                raise RuntimeError("Model upload requires the CleanRL evaluation helpers.")
+             from cleanrl_utils.huggingface import push_to_hub
+ 
+             repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
+diff --git a/README.md b/README.md
+deleted file mode 100644
+index 2544a13..0000000
+--- a/README.md
++++ /dev/null
+@@ -1,249 +0,0 @@
+-# UR5 Robotic Arm Control via Deep Reinforcement Learning
+-
+-<p align="center">
+-  <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white" />
+-  <img src="https://img.shields.io/badge/PyTorch-2.0+-ee4c2c?logo=pytorch&logoColor=white" />
+-  <img src="https://img.shields.io/badge/MuJoCo-3.0+-green" />
+-  <img src="https://img.shields.io/badge/Gymnasium-1.0+-orange" />
+-  <img src="https://img.shields.io/badge/W%26B-Tracking-yellow?logo=weightsandbiases" />
+-</p>
+-
+-**Training a 6-DOF robotic manipulator to autonomously reach randomized target positions using PPO and TD3 — from scratch, in simulation.**
+-
+-This project implements, tunes, and benchmarks two state-of-the-art deep reinforcement learning algorithms for continuous robotic control: **Proximal Policy Optimization (PPO)** and **Twin Delayed DDPG (TD3)**. The entire pipeline — environment, reward function, training loop, and evaluation — was built and iterated on as a research project in intelligent robotics.
+-
+----
+-
+-## Simulation Environment
+-
+-<p align="center">
+-  <img src="docs/mujoco_ur5_setup.png" alt="UR5 MuJoCo Simulation" width="720" />
+-</p>
+-
+-> _The UR5e arm in the MuJoCo physics simulator. The green sphere marks the target position the agent must learn to reach. Two work surfaces simulate a realistic tabletop manipulation scenario._
+-
+----
+-
+-## Demo
+-[Watch Demo Video!](https://github.com/niccolasparra/UR5-Reinforcement-Learning/issues/1#issue-4107960304)
+-   
+-
+-
+-> _A trained agent controlling the UR5 arm to reach a target pose in real time._
+-
+----
+-
+-## Why This Project Matters
+-
+-Most RL tutorials stop at CartPole or Atari. This project tackles a **real robotics problem**: controlling a physical-grade 6-DOF manipulator in a physics-accurate simulator with joint limits, gravity, collisions, and a shaped reward signal that had to be carefully engineered.
+-
+-The core challenge: **How do you get a neural network to learn smooth, collision-free trajectories to arbitrary 3D positions — using only trial and error?**
+-
+----
+-
+-## Technical Architecture
+-
+-### The Environment (`env.py`)
+-
+-A custom **Gymnasium environment** built on top of MuJoCo that simulates the UR5e robotic arm with full rigid-body dynamics.
+-
+-| Component | Details |
+-|---|---|
+-| **Observation Space** | 19D vector: joint positions (6) + joint velocities (6) + end-effector position (3) + goal position (3) + collision flag (1) |
+-| **Action Space** | 6D continuous: per-joint velocity deltas, bounded at ±0.05 rad/step |
+-| **Physics** | MuJoCo with 10 substeps per action, PD position controller with gravity compensation (Kp=2000, Kd=400) |
+-| **Episode** | Max 1024 steps. Terminates on success (EE within 5cm of goal) or collision |
+-| **Goal Sampling** | Randomized target positions within the robot's reachable workspace at each episode reset |
+-
+-### Reward Function Design
+-
+-The reward function is the single most critical design decision in any RL system. This one was engineered through multiple iterations to balance **learning speed**, **trajectory smoothness**, and **collision avoidance**:
+-
+-```
+-R(s, a, s') = progress + distance_penalty + orientation + collision + success + time_penalty
+-```
+-
+-| Component | Formula | Purpose |
+-|---|---|---|
+-| **Progress** | `10.0 × (d_prev - d) / max(d, 1e-6)` | Rewards getting closer to the goal |
+-| **Distance Penalty** | `-0.5 × d` | Continuous pressure to minimize distance |
+-| **Collision** | `-10.0` on contact | Hard penalty for unsafe trajectories |
+-| **Success Bonus** | `+100.0` when `d < 0.05m` | Clear terminal reward signal |
+-| **Time** | `-0.01` per step | Encourages efficiency |
+-| **Orientation** | `w × (alignment)^2` | Optional alignment of EE axis with target |
+-
+-**Key design insight:** normalizing the progress reward by `max(d, 1e-6)` creates a relative improvement signal — the agent gets proportionally more reward for small improvements when it's already close to the goal, producing better fine-grained positioning behavior.
+-
+-### Algorithms
+-
+-#### PPO (Proximal Policy Optimization) — On-Policy
+-
+-An actor-critic architecture with a clipped surrogate objective that constrains policy updates to prevent catastrophic forgetting.
+-
+-- **Actor**: 2-layer MLP (64 units, Tanh activations) with learned log-std for stochastic Gaussian policy
+-- **Critic**: Separate 2-layer MLP (64 units) estimating state value V(s)
+-- **Key hyperparameters**: `clip_coef=0.2`, `ent_coef=0.01`, `gae_lambda=0.95`, `num_steps=1024`, `update_epochs=10`
+-- **Orthogonal initialization** on all layers for stable early training
+-
+-#### TD3 (Twin Delayed DDPG) — Off-Policy
+-
+-A deterministic actor-critic with three stabilization mechanisms that address Q-value overestimation in continuous control.
+-
+-- **Actor**: 2-layer MLP (256 units, ReLU) outputting deterministic actions via Tanh
+-- **Twin Critics**: Two independent Q-networks — the minimum of both is used for target computation, reducing overestimation bias
+-- **Delayed Policy Updates**: Actor updates every 2 critic updates, preventing policy oscillation on noisy value estimates
+-- **Target Policy Smoothing**: Clipped Gaussian noise added to target actions, smoothing the value landscape
+-- **Key hyperparameters**: `buffer_size=1M`, `batch_size=256`, `tau=0.005`, `exploration_noise=0.1`, `policy_noise=0.2`
+-
+-### Inverse Kinematics Module (`ik.py`, `ik_solver.py`)
+-
+-A custom IK solver used to **initialize the robot near the start position** at episode reset, improving sample efficiency by reducing the initial distance the agent needs to learn to traverse.
+-
+----
+-
+-## Repository Structure
+-
+-```
+-├── env.py                         # Custom Gymnasium environment (UR5 + MuJoCo)
+-├── __init__.py                    # Gym environment registration (UR5-v0)
+-├── ik.py                          # Inverse kinematics implementation
+-├── ik_solver.py                   # IK solver utilities
+-│
+-├── Algorithms/
+-│   ├── ppo_continuous_action.py   # PPO implementation (adapted from CleanRL)
+-│   └── td3_ur5.py                 # TD3 implementation (adapted for UR5)
+-│
+-├── Scripts/
+-│   ├── visualize_agent.py         # Visualize trained agent behavior
+-│   └── record_hd.py              # Record high-quality evaluation videos
+-│
+-├── assets/                        # UR5e MuJoCo model (MJCF + OBJ meshes)
+-│   ├── scene.xml                  # World scene definition
+-│   ├── ur5e.xml                   # UR5e robot model
+-│   └── assets/                    # 3D mesh files (.obj)
+-│
+-├── requirements.txt               # Python dependencies
+-└── LICENSE
+-```
+-
+----
+-
+-## Getting Started
+-
+-### Prerequisites
+-
+-- Python 3.10+
+-- A machine with a GPU is recommended for training (CPU works but is slower)
+-- GLFW for MuJoCo rendering on macOS: `brew install glfw`
+-
+-### Installation
+-
+-```bash
+-git clone https://github.com/niccolasparra/UR5-Reinforcement-Learning.git
+-cd UR5-Reinforcement-Learning
+-
+-# Create and activate a virtual environment (recommended)
+-python -m venv venv
+-source venv/bin/activate
+-
+-# Install dependencies
+-pip install -r requirements.txt
+-```
+-
+-### Training
+-
+-**Train PPO:**
+-```bash
+-python Algorithms/ppo_continuous_action.py \
+-    --total-timesteps 1000000 \
+-    --num-envs 1 \
+-    --learning-rate 3e-4 \
+-    --track
+-```
+-
+-**Train TD3:**
+-```bash
+-python Algorithms/td3_ur5.py \
+-    --total-timesteps 500000 \
+-    --learning-rate 3e-4 \
+-    --track
+-```
+-
+-Training metrics (episodic return, success rate, losses) are logged to **Weights & Biases** and **TensorBoard** in real time.
+-
+-### Evaluation
+-
+-```bash
+-# Visualize a trained agent
+-python Scripts/visualize_agent.py
+-
+-# Record evaluation videos
+-python Scripts/record_hd.py
+-```
+-
+----
+-
+-## Key Results
+-
+-### Success Rate — PPO vs TD3
+-
+-<p align="center">
+-  <img src="docs/success_rate_ppo_vs_td3.png" alt="Success Rate: PPO vs TD3" width="720" />
+-</p>
+-
+-> _Tracked with Weights & Biases. PPO (blue) reaches >85% success rate with fast, monotonic convergence. TD3 (orange) converges more slowly but steadily climbs to ~67% within the same training window._
+-
+-| Metric | PPO | TD3 |
+-|---|---|---|
+-| **Peak Success Rate** | **>85%** | ~67% |
+-| **Convergence Speed** | Fast — 80% by ~4K episodes | Gradual — 67% by ~8K episodes |
+-| **Training Stability** | High — smooth, monotonic curve | Moderate — slower ramp-up |
+-| **Trajectory Quality** | Smooth, conservative paths | Direct, efficient paths |
+-| **Sample Efficiency** | Lower (on-policy) | Higher (off-policy replay buffer) |
+-
+-**Takeaway:** PPO significantly outperformed TD3 in this task, reaching >85% success rate with fast, stable convergence. TD3's slower ramp-up is expected — off-policy methods require filling the replay buffer before meaningful learning begins, and the exploration noise parameters may need further tuning for this specific action space. Both algorithms demonstrate that the environment and reward function are well-designed: the agents learn consistently and improve monotonically, which is a strong signal that the MDP formulation is sound.
+-
+----
+-
+-## Tech Stack
+-
+-- **Simulation**: [MuJoCo](https://mujoco.org/) — physics engine for robotics research
+-- **RL Framework**: [CleanRL](https://github.com/vwxyzjn/cleanrl) — single-file RL implementations
+-- **Environment API**: [Gymnasium](https://gymnasium.farama.org/) — standard RL interface
+-- **Deep Learning**: [PyTorch](https://pytorch.org/) — neural network training
+-- **Experiment Tracking**: [Weights & Biases](https://wandb.ai/) + TensorBoard
+-- **Robot Model**: [UR5e](https://www.universal-robots.com/products/ur5-robot/) from MuJoCo Menagerie
+-
+----
+-
+-## Conclusions & Future Work
+-
+-The results confirm that the system is **well-architected**: both algorithms learn meaningful policies from scratch, and the reward function provides a strong enough gradient signal to drive consistent improvement across hundreds of thousands of timesteps. PPO's >85% success rate demonstrates that a 6-DOF manipulator can reliably learn point-to-point reaching through pure reinforcement learning, without any demonstrations or trajectory planning.
+-
+-That said, there is clear room to push performance further. The three highest-leverage improvements I'd prioritize next:
+-
+-1. **Reward normalization.** The current reward components operate at different scales (progress ∈ [-10, 10], success = +100, time = -0.01). Normalizing these to a common range — or using a running reward standardization layer — would give the optimizer a smoother loss landscape and likely accelerate convergence for both algorithms.
+-
+-2. **Exploration noise reduction for TD3.** TD3's slower convergence suggests that `exploration_noise=0.1` may be too aggressive for the UR5's tight action bounds (±0.05 rad/step). Decaying the noise schedule over training, or switching to parameter-space noise, could significantly improve TD3's sample efficiency and close the gap with PPO.
+-
+-3. **Discount factor (γ) tuning.** Both algorithms use γ=0.99, which creates a long effective planning horizon (~100 steps). For a reaching task where episodes are often solved in fewer steps, a lower γ (0.95–0.98) could stabilize value estimates and reduce variance in the critic's predictions — especially for TD3, where Q-value accuracy directly impacts policy quality.
+-
+-Beyond hyperparameters, the natural next steps are **domain randomization** (varying object mass, friction, and joint damping) for sim-to-real transfer, and **curriculum learning** to progressively increase goal difficulty.
+-
+----
+-
+-## References
+-
+-1. Schulman et al., _"Proximal Policy Optimization Algorithms"_ (2017) — [arXiv:1707.06347](https://arxiv.org/abs/1707.06347)
+-2. Fujimoto et al., _"Addressing Function Approximation Error in Actor-Critic Methods"_ (2018) — [arXiv:1802.09477](https://arxiv.org/abs/1802.09477)
+-3. Huang et al., _"CleanRL: High-quality Single-file Implementations of Deep RL Algorithms"_ (2022) — [JMLR](https://jmlr.org/papers/v23/21-1342.html)
+-
+----
+-
+-## License
+-
+-This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+-
+----
+-
+-<p align="center"><i>Built by <a href="https://github.com/niccolasparra">Niccolás Parra</a></i></p>
+diff --git a/Scripts/visualize_agent.py b/Scripts/visualize_agent.py
+index f2ef069..cb7090c 100755
+--- a/Scripts/visualize_agent.py
++++ b/Scripts/visualize_agent.py
+@@ -1,92 +1,442 @@
+ #!/usr/bin/env python3
+-"""Visualize trained agent in MuJoCo viewer.
++"""Evaluate UR5/RM75 point policies or the RM75 approach-direction policy.
+ 
+-Usage:
+-    python visualize_agent.py --model-path runs/YOUR_RUN_NAME/ppo_continuous_action.cleanrl_model
++Examples:
++    # Open the MuJoCo viewer with the newest saved model.
++    python Scripts/visualize_agent.py
++
++    # Evaluate 100 random goals without rendering.
++    python Scripts/visualize_agent.py --headless --episodes 100
++
++    # Evaluate a specific model with stochastic training-time actions.
++    python Scripts/visualize_agent.py \
++        --model-path runs/RUN_NAME/ppo_continuous_action.cleanrl_model \
++        --headless \
++        --episodes 100 \
++        --stochastic
+ """
+ 
++from __future__ import annotations
++
+ import argparse
+ import sys
+-import os
++import time
++from pathlib import Path
++
+ import numpy as np
+ import torch
+-import gymnasium as gym
+ 
+-# Add parent dir to path for imports
+-sys.path.insert(0, os.path.dirname(__file__))
+ 
+-import UR5  # Register environment
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++if str(PROJECT_ROOT) not in sys.path:
++    sys.path.insert(0, str(PROJECT_ROOT))
++
++from Algorithms.ppo_continuous_action import Agent
+ from env import UR5P2PEnv
+-from cleanrl.cleanrl.ppo_continuous_action import Agent, Args, make_env
++from env_rm75 import RM75P2PEnv
++
++
++SUPPORTED_MODEL_ENVS = {
++    (19, 6): "UR5-v0",
++    (28, 7): "RM75-v0",
++    (31, 7): "RM75Direction-v0",
++}
+ 
++def latest_model_path() -> Path:
++    """Return the most recently modified saved PPO model."""
++    candidates = list(
++        (PROJECT_ROOT / "runs").glob("**/*.cleanrl_model")
++    )
++    if not candidates:
++        raise FileNotFoundError(
++            "No .cleanrl_model file was found under runs/."
++        )
++    return max(candidates, key=lambda path: path.stat().st_mtime)
++
++
++def resolve_model_path(model_path: str | None) -> Path:
++    """Resolve an explicit model path or select the newest saved model."""
++    if model_path is None:
++        return latest_model_path()
++
++    candidate = Path(model_path).expanduser()
++    if candidate.is_file():
++        return candidate.resolve()
+ 
+-def main():
+-    parser = argparse.ArgumentParser()
+-    parser.add_argument("--model-path", type=str, required=True, help="Path to .cleanrl_model file")
+-    parser.add_argument("--episodes", type=int, default=5, help="Number of episodes to visualize")
+-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+-    parser.add_argument("--target-mode", type=str, default="random", help="Goal sampling mode")
+-    args_viz = parser.parse_args()
++    project_candidate = PROJECT_ROOT / candidate
++    if project_candidate.is_file():
++        return project_candidate.resolve()
+ 
+-    device = torch.device("cpu")
++    raise FileNotFoundError(f"Model file does not exist: {model_path}")
+ 
+-    # Create environment with rendering
+-    env = UR5P2PEnv(
+-        render_mode="human",
+-        seed=args_viz.seed,
+-        target_mode=args_viz.target_mode,
+-        target_pos=None,
++
++def load_model_state(model_path: Path) -> dict[str, torch.Tensor]:
++    """Load an Agent state dict from weights or a full checkpoint."""
++    try:
++        payload = torch.load(
++            model_path,
++            map_location="cpu",
++            weights_only=True,
++        )
++    except TypeError:
++        payload = torch.load(model_path, map_location="cpu")
++
++    state = (
++        payload["agent_state_dict"]
++        if isinstance(payload, dict) and "agent_state_dict" in payload
++        else payload
+     )
++    if not isinstance(state, dict):
++        raise ValueError(
++            f"Model file does not contain a state dictionary: {model_path}"
++        )
++    return state
++
+ 
+-    # Setup agent args (must match training config)
+-    args = Args()
+-    args.env_id = "UR5-v0"
+-    args.target_mode = args_viz.target_mode
+-    args.target_pos = None
++def model_dimensions(state: dict[str, torch.Tensor]) -> tuple[int, int]:
++    """Read observation and action dimensions from a saved point policy."""
++    try:
++        observation_dim = int(state["critic.0.weight"].shape[1])
++        action_dim = int(state["actor_logstd"].shape[-1])
++    except (KeyError, IndexError, AttributeError) as exc:
++        raise ValueError(
++            "Cannot determine model dimensions from critic.0.weight and "
++            "actor_logstd."
++        ) from exc
++    return observation_dim, action_dim
+ 
+-    # Create dummy env for agent initialization (to get observation space)
+-    dummy_envs = gym.vector.SyncVectorEnv(
+-        [make_env(args.env_id, 0, False, "eval", 0.99, args=args)]
++
++def infer_environment_id(state: dict[str, torch.Tensor]) -> str:
++    """Map supported saved dimensions to the matching point environment."""
++    dimensions = model_dimensions(state)
++    try:
++        return SUPPORTED_MODEL_ENVS[dimensions]
++    except KeyError as exc:
++        raise ValueError(
++            "Unsupported model dimensions: "
++            f"{dimensions[0]} observations and {dimensions[1]} actions. "
++            "Supported models are UR5-v0 (19/6), RM75-v0 (28/7), "
++            "and RM75Direction-v0 (31/7)."
++        ) from exc
++
++
++def create_environment(env_id: str, args, render_mode):
++    """Construct the selected point-reaching environment."""
++    kwargs = {
++        "render_mode": render_mode,
++        "seed": args.seed,
++        "target_mode": args.target_mode,
++        "target_pos": (
++            tuple(args.target_pos)
++            if args.target_pos is not None
++            else None
++        ),
++    }
++    if env_id == "UR5-v0":
++        return UR5P2PEnv(**kwargs)
++    if env_id in {"RM75-v0", "RM75Direction-v0"}:
++        return RM75P2PEnv(
++            **kwargs,
++            require_direction=(env_id == "RM75Direction-v0"),
++        )
++    raise ValueError(f"Unsupported environment: {env_id}")
++
++
++def load_agent(state: dict[str, torch.Tensor], env, env_id: str) -> Agent:
++    """Create a V4 Agent and reject model/environment mismatches clearly."""
++    model_shape = model_dimensions(state)
++    env_shape = (
++        int(np.prod(env.observation_space.shape)),
++        int(np.prod(env.action_space.shape)),
+     )
+-    agent = Agent(dummy_envs).to(device)
++    if model_shape != env_shape:
++        raise ValueError(
++            f"The model expects {model_shape[0]} observations and "
++            f"{model_shape[1]} actions, but {env_id} provides "
++            f"{env_shape[0]} observations and {env_shape[1]} actions."
++        )
+ 
+-    # Load trained weights
+-    print(f"Loading model from: {args_viz.model_path}")
+-    agent.load_state_dict(torch.load(args_viz.model_path, map_location=device))
++    agent = Agent(env).to(torch.device("cpu"))
++    agent.load_state_dict(state)
+     agent.eval()
++    return agent
++
++
++def select_action(
++    agent: Agent,
++    observation: np.ndarray,
++    *,
++    stochastic: bool,
++) -> np.ndarray:
++    """Return either a deterministic policy action or a sampled action."""
++    obs_tensor = torch.as_tensor(
++        observation[None, :],
++        dtype=torch.float32,
++    )
++    with torch.no_grad():
++        if stochastic:
++            action = agent.get_action_and_value(obs_tensor)[0]
++        else:
++            action = torch.tanh(agent.actor_mean(obs_tensor))
++    return action[0].cpu().numpy()
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(
++        description=(
++            "Visualize or batch-evaluate a trained UR5 or RM75 random-point "
++            "reaching policy."
++        )
++    )
++    parser.add_argument(
++        "--env-id",
++        choices=("auto", "UR5-v0", "RM75-v0", "RM75Direction-v0"),
++        default="auto",
++        help=(
++            "Evaluation environment. The default infers it from the saved "
++            "observation/action dimensions."
++        ),
++    )
++    parser.add_argument(
++        "--model-path",
++        type=str,
++        default=None,
++        help=(
++            "Path to a .cleanrl_model file. When omitted, the newest model "
++            "under runs/ is used."
++        ),
++    )
++    parser.add_argument(
++        "--episodes",
++        type=int,
++        default=5,
++        help="Number of episodes to run.",
++    )
++    parser.add_argument(
++        "--seed",
++        type=int,
++        default=42,
++        help="First evaluation seed; each episode adds one.",
++    )
++    parser.add_argument(
++        "--target-mode",
++        choices=("random", "fixed"),
++        default="random",
++        help="How evaluation goals are selected.",
++    )
++    parser.add_argument(
++        "--target-pos",
++        type=float,
++        nargs=3,
++        default=None,
++        metavar=("X", "Y", "Z"),
++        help="Fixed target position; requires --target-mode fixed.",
++    )
++    parser.add_argument(
++        "--headless",
++        action="store_true",
++        help="Disable the viewer and run a faster statistical evaluation.",
++    )
++    parser.add_argument(
++        "--stochastic",
++        action="store_true",
++        help=(
++            "Sample from the training-time action distribution. The default "
++            "uses deterministic mean actions."
++        ),
++    )
++    parser.add_argument(
++        "--progress-every",
++        type=int,
++        default=100,
++        help="Print distance every N steps; use 0 to disable.",
++    )
++    parser.add_argument(
++        "--realtime",
++        action=argparse.BooleanOptionalAction,
++        default=True,
++        help="Pace rendered episodes at simulated real time.",
++    )
++    args = parser.parse_args()
++
++    if args.episodes <= 0:
++        parser.error("--episodes must be greater than zero")
++    if args.progress_every < 0:
++        parser.error("--progress-every must be non-negative")
++    if args.target_mode == "fixed" and args.target_pos is None:
++        parser.error("--target-mode fixed requires --target-pos X Y Z")
++    return args
++
++
++def main() -> None:
++    args = parse_args()
++    model_path = resolve_model_path(args.model_path)
++    state = load_model_state(model_path)
++    env_id = (
++        infer_environment_id(state)
++        if args.env_id == "auto"
++        else args.env_id
++    )
++    render_mode = None if args.headless else "human"
++    env = create_environment(env_id, args, render_mode)
++    agent = load_agent(state, env, env_id)
++
++    action_mode = "stochastic" if args.stochastic else "deterministic"
++    print(f"Model: {model_path}")
++    print(f"Environment: {env_id}")
++    print(f"Action mode: {action_mode}")
++    print(f"Target mode: {args.target_mode}")
++
++    results: list[dict[str, float | int | bool | str]] = []
++    simulation_step_seconds = float(
++        env.model.opt.timestep * env.substeps
++    )
++
++    try:
++        for episode in range(args.episodes):
++            observation, _ = env.reset(seed=args.seed + episode)
++            initial_distance = float(env.prev_dist)
++            total_reward = 0.0
++            info: dict = {}
++
++            if not args.headless:
++                print(
++                    f"\nEpisode {episode + 1}/{args.episodes}: "
++                    f"goal={np.round(env.goal_pos, 4)}, "
++                    f"initial_dist={initial_distance:.4f}"
++                )
++
++            for step in range(1, env.horizon + 1):
++                wall_start = time.perf_counter()
++                action = select_action(
++                    agent,
++                    observation,
++                    stochastic=args.stochastic,
++                )
++                observation, reward, terminated, truncated, info = (
++                    env.step(action)
++                )
++                total_reward += float(reward)
++
++                if (
++                    not args.headless
++                    and args.progress_every
++                    and step % args.progress_every == 0
++                ):
++                    print(
++                        f"  step={step}, dist={float(info['dist']):.4f}, "
++                        f"direction_deg="
++                        f"{float(info.get('direction_angle_deg') or 0.0):.2f}, "
++                        f"reward={float(reward):.3f}"
++                    )
++
++                if not args.headless and args.realtime:
++                    elapsed = time.perf_counter() - wall_start
++                    time.sleep(max(0.0, simulation_step_seconds - elapsed))
++
++                if terminated or truncated:
++                    break
++
++            success = bool(info.get("success", False))
++            collision = bool(info.get("collision", False))
++            timeout = not success and not collision
++            reason = (
++                "success"
++                if success
++                else "collision"
++                if collision
++                else "timeout"
++            )
++            final_distance = float(info.get("dist", np.nan))
++            final_direction_angle = info.get("direction_angle_deg", np.nan)
++            final_direction_angle = (
++                np.nan
++                if final_direction_angle is None
++                else float(final_direction_angle)
++            )
++            results.append(
++                {
++                    "success": success,
++                    "collision": collision,
++                    "timeout": timeout,
++                    "reason": reason,
++                    "steps": step,
++                    "initial_distance": initial_distance,
++                    "final_distance": final_distance,
++                    "final_direction_angle_deg": final_direction_angle,
++                    "position_success": bool(
++                        info.get(
++                            "position_reached",
++                            info.get("position_success", success),
++                        )
++                    ),
++                    "direction_success": bool(
++                        info.get(
++                            "direction_reached",
++                            info.get("direction_success", True),
++                        )
++                    ),
++                    "return": total_reward,
++                }
++            )
++            print(
++                f"Episode {episode + 1:03d}: {reason:9s} | "
++                f"steps={step:4d} | final_dist={final_distance:.4f} | "
++                f"direction={final_direction_angle:6.2f} deg | "
++                f"return={total_reward:.2f}"
++            )
++    finally:
++        env.close()
++
++    success_rate = np.mean([item["success"] for item in results])
++    collision_rate = np.mean([item["collision"] for item in results])
++    timeout_rate = np.mean([item["timeout"] for item in results])
++    mean_steps = np.mean([item["steps"] for item in results])
++    mean_initial_distance = np.mean(
++        [item["initial_distance"] for item in results]
++    )
++    mean_final_distance = np.mean(
++        [item["final_distance"] for item in results]
++    )
++    mean_return = np.mean([item["return"] for item in results])
++    position_success_rate = np.mean(
++        [item["position_success"] for item in results]
++    )
++    direction_success_rate = np.mean(
++        [item["direction_success"] for item in results]
++    )
++    direction_angles = np.asarray(
++        [item["final_direction_angle_deg"] for item in results],
++        dtype=np.float64,
++    )
++    mean_direction_angle = (
++        float(np.nanmean(direction_angles))
++        if not np.all(np.isnan(direction_angles))
++        else np.nan
++    )
+ 
+-    # Run episodes
+-    for ep in range(args_viz.episodes):
+-        obs, info = env.reset()
+-        done = False
+-        total_reward = 0
+-        steps = 0
+-
+-        print(f"\n=== Episode {ep + 1}/{args_viz.episodes} ===")
+-        print(f"Goal position: {env.goal_pos}")
+-        print(f"Start position: {env.start_pos}")
+-
+-        while not done:
+-            obs_t = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0).to(device)
+-            with torch.no_grad():
+-                action, _, _, _ = agent.get_action_and_value(obs_t)
+-            
+-            obs, reward, terminated, truncated, info = env.step(action.squeeze(0).cpu().numpy())
+-            total_reward += reward
+-            steps += 1
+-            done = terminated or truncated
+-
+-            # Print progress every 100 steps
+-            if steps % 100 == 0:
+-                ee_pos = env._ee_pos()
+-                dist = np.linalg.norm(ee_pos - env.goal_pos) if env.goal_pos is not None else 0
+-                print(f"  Step {steps}: dist={dist:.4f}, reward={reward:.3f}")
+-
+-        print(f"Episode finished: success={info.get('success', False)}, "
+-              f"total_reward={total_reward:.2f}, steps={steps}")
+-
+-    env.close()
+-    print("\nVisualization complete!")
++    print("\nEvaluation summary")
++    print(f"  episodes:             {len(results)}")
++    print(f"  success_rate:         {success_rate:.3f}")
++    if env_id == "RM75Direction-v0":
++        print(f"  position_success_rate:{position_success_rate:9.3f}")
++        print(f"  direction_success_rate:{direction_success_rate:8.3f}")
++    print(f"  collision_rate:       {collision_rate:.3f}")
++    print(f"  timeout_rate:         {timeout_rate:.3f}")
++    print(f"  mean_steps:           {mean_steps:.1f}")
++    print(f"  mean_initial_distance:{mean_initial_distance:9.4f}")
++    print(f"  mean_final_distance:  {mean_final_distance:.4f}")
++    if env_id == "RM75Direction-v0":
++        print(f"  mean_direction_deg:   {mean_direction_angle:.2f}")
++    print(f"  mean_return:          {mean_return:.2f}")
++    if env_id == "RM75Direction-v0":
++        print(
++            "\nTask scope: target position plus a fixed tool-axis approach "
++            "direction, with rotation around that axis left free."
++        )
++    else:
++        print("\nTask scope: end-effector point reaching only.")
++    print("Object grasping and gripper closure are not simulated.")
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/__init__.py b/__init__.py
+index 5b27bf7..861ba85 100644
+--- a/__init__.py
++++ b/__init__.py
+@@ -1,9 +1,32 @@
+ import gymnasium as gym
++
+ from env import UR5P2PEnv
++from env_rm75 import RM75P2PEnv
++
++if "UR5-v0" not in gym.registry:
++    gym.register(
++        id="UR5-v0",
++        entry_point=UR5P2PEnv,
++        kwargs={"render_mode": None, "target_mode": "random"},
++        max_episode_steps=None,
++    )
++
++if "RM75-v0" not in gym.registry:
++    gym.register(
++        id="RM75-v0",
++        entry_point=RM75P2PEnv,
++        kwargs={"render_mode": None, "target_mode": "random"},
++        max_episode_steps=None,
++    )
+ 
+-gym.register(
+-    id="UR5-v0",
+-    entry_point="env:UR5P2PEnv",
+-    kwargs={"render_mode": None, "target_mode": "random"},
+-    max_episode_steps=None,   # or your preferred horizon
+-)
+\ No newline at end of file
++if "RM75Direction-v0" not in gym.registry:
++    gym.register(
++        id="RM75Direction-v0",
++        entry_point=RM75P2PEnv,
++        kwargs={
++            "render_mode": None,
++            "target_mode": "random",
++            "require_direction": True,
++        },
++        max_episode_steps=None,
++    )
+diff --git a/env.py b/env.py
+index 8ef0324..b071f6f 100644
+--- a/env.py
++++ b/env.py
+@@ -39,9 +39,20 @@ class UR5P2PEnv(gym.Env):
+         self.horizon = 1024
+         self.step_i = 0
+ 
+-        # Action / observation spaces
+-        act_limit = np.ones(self.nu, dtype=np.float32) * 0.05  # per-step joint delta in radians
+-        self.action_space = gym.spaces.Box(-act_limit, act_limit, dtype=np.float32)
++        # The policy emits dimensionless actions in [-1, 1]. The
++        # environment maps them to joint-reference increments so policy
++        # probability and physical control units are not mixed together.
++        self.action_scale = np.full(
++            self.nu,
++            0.02,
++            dtype=np.float64,
++        )
++        self.action_space = gym.spaces.Box(
++            low=-1.0,
++            high=1.0,
++            shape=(self.nu,),
++            dtype=np.float32,
++        )
+ 
+         # obs: q(6)+qd(6)+ee(3)+goal(3)+collision(1) = 19
+         obs_high = np.ones(6+6+3+3+1, dtype=np.float32) * np.inf  # q(6)+qd(6)+ee(3)+goal(3)+collision(1)
+@@ -54,7 +65,8 @@ class UR5P2PEnv(gym.Env):
+         self.viewer_failed = False
+         self._viewer_builtin = False
+         self.ctrl_mode = os.getenv("UR5_CTRL_MODE", "position")  # 'position' | 'torque' | 'velocity'
+-        self.debug = os.getenv("UR5_DEBUG", "1") == "1"
++        # Keep training quiet by default. Set UR5_DEBUG=1 for reset/IK logs.
++        self.debug = os.getenv("UR5_DEBUG", "0") == "1"
+         self._once_logged = False
+ 
+         self.prev_dist = 0.0
+@@ -66,15 +78,15 @@ class UR5P2PEnv(gym.Env):
+         self.reward_cfg = {
+             "dist_success_thresh": 0.05,
+             "time_penalty": 0.01,
+-            "collision_penalty": 10.0,
++            "collision_penalty": 70.0,
+             "success_bonus": 100.0,
+             "orient_weight": 0.0,
+             "orient_power": 2.0,
+-            "progress_scale": 10.0,  # Increased from 5.0 for stronger progress reward
+-            "dist_weight": 0.5,  # NEW: continuous penalty for distance to goal
++            "progress_scale": 50,  # Increased from 5.0 for stronger progress reward
++            "dist_weight": 0.02,# NEW: continuous penalty for distance to goal
+         }
+ 
+-        # Base MJCF load (UR5 + ground etc.), tables are rebuilt on each reset
++        # Build the fixed robot/table model once. reset() only resets MjData.
+         self.base_mjcf = mjcf.from_path(UR5_SCENE_XML)
+ 
+         # UR5 end-effector site name (may differ per model)
+@@ -270,15 +282,34 @@ class UR5P2PEnv(gym.Env):
+ 
+     # ---------- Gym API ----------
+     def reset(self, *, seed=None, options=None):
++        super().reset(seed=seed)
+         if seed is not None:
+             self.rng = np.random.default_rng(seed)
+         self.step_i = 0
+ 
+-        # Rebuild scene (including table geometry)
+-        self._build_scene_and_model()
++        # Keep the compiled robot/table model and clear only per-episode
++        # positions, velocities, controls, contacts, and simulation time.
++        mj.mj_resetData(self.model, self.data)
++
++        # Define the Cartesian start before IK. Noise is applied to the IK
++        # initial guess, so resets remain randomized without recompiling XML.
++        self.start_pos = np.array(
++            [0.4, 0.0, 0.1405 + 0.150],
++            dtype=np.float64,
++        )
+ 
+         # Initial joint configuration
+-        q0 = np.array([-3.483192, -1.723273, 2.236795, -2.084319, -1.570798, -1.904485], dtype=np.float64)
++        q0 = np.array(
++            [
++                -3.483192,
++                -1.723273,
++                2.236795,
++                -2.084319,
++                -1.570798,
++                -1.904485,
++            ],
++            dtype=np.float64,
++        )
+         q0 += self.rng.normal(0, 0.02, size=self.nq)
+         
+         # Use IK to initialize near start_pos if enabled
+@@ -309,8 +340,6 @@ class UR5P2PEnv(gym.Env):
+         if warmup_steps:
+             self._step_sim(warmup_steps)
+ 
+-        # Set initial start position to a fixed point (near the center of the table)
+-        self.start_pos = np.array([0.4, 0.0, 0.1405 + 0.150], dtype=np.float64)
+         self.goal_pos = None
+         if self.start_pos is not None:
+             self.model.site_pos[self.start_sid] = self.start_pos
+@@ -404,12 +433,17 @@ class UR5P2PEnv(gym.Env):
+ 
+     def step(self, action):
+         self.step_i += 1
+-        action = np.clip(action, self.action_space.low, self.action_space.high)
++        normalized_action = np.clip(
++            action,
++            self.action_space.low,
++            self.action_space.high,
++        ).astype(np.float64)
++        joint_delta = self.action_scale * normalized_action
+ 
+         if self.q_target is None or self.q_target.shape[0] != self.nq:
+             self.q_target = self.data.qpos[:self.nq].copy()
+ 
+-        self.q_target = self.q_target.astype(np.float64) + action.astype(np.float64)
++        self.q_target = self.q_target.astype(np.float64) + joint_delta
+ 
+         if self.model is not None and getattr(self.model, "njnt", 0) >= self.nq:
+             jrange = self.model.jnt_range[:self.nq]
+@@ -472,8 +506,7 @@ class UR5P2PEnv(gym.Env):
+         # Distance-based progress reward (relative improvement)
+         progress = 0.0
+         if dist is not None and prev_dist != 0.0:
+-            denom = max(dist, 1e-6)
+-            progress = cfg["progress_scale"] * (prev_dist - dist) / denom
++            progress = cfg["progress_scale"] * (prev_dist - dist)
+ 
+         # Distance penalty (absolute distance to goal)
+         dist_penalty = 0.0
+@@ -675,10 +708,12 @@ if __name__ == "__main__":
+     parser.add_argument("--target-pos", type=float, nargs=3, default=None)
+     args = parser.parse_args()
+ 
+-    env = UR5P2PEnv(render_mode="human" if args.interactive else None,
+-                    seed=args.seed,
+-                    target_mode=args.target_mode,
+-                    target_pos=args.target_pos)
++    env = UR5P2PEnv(
++        render_mode=None,
++        seed=args.seed,
++        target_mode=args.target_mode,
++        target_pos=args.target_pos,
++    )
+ 
+     if args.interactive:
+         env.reset()

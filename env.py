@@ -39,9 +39,20 @@ class UR5P2PEnv(gym.Env):
         self.horizon = 1024
         self.step_i = 0
 
-        # Action / observation spaces
-        act_limit = np.ones(self.nu, dtype=np.float32) * 0.05  # per-step joint delta in radians
-        self.action_space = gym.spaces.Box(-act_limit, act_limit, dtype=np.float32)
+        # The policy emits dimensionless actions in [-1, 1]. The
+        # environment maps them to joint-reference increments so policy
+        # probability and physical control units are not mixed together.
+        self.action_scale = np.full(
+            self.nu,
+            0.02,
+            dtype=np.float64,
+        )
+        self.action_space = gym.spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(self.nu,),
+            dtype=np.float32,
+        )
 
         # obs: q(6)+qd(6)+ee(3)+goal(3)+collision(1) = 19
         obs_high = np.ones(6+6+3+3+1, dtype=np.float32) * np.inf  # q(6)+qd(6)+ee(3)+goal(3)+collision(1)
@@ -54,7 +65,8 @@ class UR5P2PEnv(gym.Env):
         self.viewer_failed = False
         self._viewer_builtin = False
         self.ctrl_mode = os.getenv("UR5_CTRL_MODE", "position")  # 'position' | 'torque' | 'velocity'
-        self.debug = os.getenv("UR5_DEBUG", "1") == "1"
+        # Keep training quiet by default. Set UR5_DEBUG=1 for reset/IK logs.
+        self.debug = os.getenv("UR5_DEBUG", "0") == "1"
         self._once_logged = False
 
         self.prev_dist = 0.0
@@ -66,15 +78,15 @@ class UR5P2PEnv(gym.Env):
         self.reward_cfg = {
             "dist_success_thresh": 0.05,
             "time_penalty": 0.01,
-            "collision_penalty": 10.0,
+            "collision_penalty": 70.0,
             "success_bonus": 100.0,
             "orient_weight": 0.0,
             "orient_power": 2.0,
-            "progress_scale": 10.0,  # Increased from 5.0 for stronger progress reward
-            "dist_weight": 0.5,  # NEW: continuous penalty for distance to goal
+            "progress_scale": 50,  # Increased from 5.0 for stronger progress reward
+            "dist_weight": 0.02,# NEW: continuous penalty for distance to goal
         }
 
-        # Base MJCF load (UR5 + ground etc.), tables are rebuilt on each reset
+        # Build the fixed robot/table model once. reset() only resets MjData.
         self.base_mjcf = mjcf.from_path(UR5_SCENE_XML)
 
         # UR5 end-effector site name (may differ per model)
@@ -270,15 +282,34 @@ class UR5P2PEnv(gym.Env):
 
     # ---------- Gym API ----------
     def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
         if seed is not None:
             self.rng = np.random.default_rng(seed)
         self.step_i = 0
 
-        # Rebuild scene (including table geometry)
-        self._build_scene_and_model()
+        # Keep the compiled robot/table model and clear only per-episode
+        # positions, velocities, controls, contacts, and simulation time.
+        mj.mj_resetData(self.model, self.data)
+
+        # Define the Cartesian start before IK. Noise is applied to the IK
+        # initial guess, so resets remain randomized without recompiling XML.
+        self.start_pos = np.array(
+            [0.4, 0.0, 0.1405 + 0.150],
+            dtype=np.float64,
+        )
 
         # Initial joint configuration
-        q0 = np.array([-3.483192, -1.723273, 2.236795, -2.084319, -1.570798, -1.904485], dtype=np.float64)
+        q0 = np.array(
+            [
+                -3.483192,
+                -1.723273,
+                2.236795,
+                -2.084319,
+                -1.570798,
+                -1.904485,
+            ],
+            dtype=np.float64,
+        )
         q0 += self.rng.normal(0, 0.02, size=self.nq)
         
         # Use IK to initialize near start_pos if enabled
@@ -309,8 +340,6 @@ class UR5P2PEnv(gym.Env):
         if warmup_steps:
             self._step_sim(warmup_steps)
 
-        # Set initial start position to a fixed point (near the center of the table)
-        self.start_pos = np.array([0.4, 0.0, 0.1405 + 0.150], dtype=np.float64)
         self.goal_pos = None
         if self.start_pos is not None:
             self.model.site_pos[self.start_sid] = self.start_pos
@@ -404,12 +433,17 @@ class UR5P2PEnv(gym.Env):
 
     def step(self, action):
         self.step_i += 1
-        action = np.clip(action, self.action_space.low, self.action_space.high)
+        normalized_action = np.clip(
+            action,
+            self.action_space.low,
+            self.action_space.high,
+        ).astype(np.float64)
+        joint_delta = self.action_scale * normalized_action
 
         if self.q_target is None or self.q_target.shape[0] != self.nq:
             self.q_target = self.data.qpos[:self.nq].copy()
 
-        self.q_target = self.q_target.astype(np.float64) + action.astype(np.float64)
+        self.q_target = self.q_target.astype(np.float64) + joint_delta
 
         if self.model is not None and getattr(self.model, "njnt", 0) >= self.nq:
             jrange = self.model.jnt_range[:self.nq]
@@ -472,8 +506,7 @@ class UR5P2PEnv(gym.Env):
         # Distance-based progress reward (relative improvement)
         progress = 0.0
         if dist is not None and prev_dist != 0.0:
-            denom = max(dist, 1e-6)
-            progress = cfg["progress_scale"] * (prev_dist - dist) / denom
+            progress = cfg["progress_scale"] * (prev_dist - dist)
 
         # Distance penalty (absolute distance to goal)
         dist_penalty = 0.0
@@ -675,10 +708,12 @@ if __name__ == "__main__":
     parser.add_argument("--target-pos", type=float, nargs=3, default=None)
     args = parser.parse_args()
 
-    env = UR5P2PEnv(render_mode="human" if args.interactive else None,
-                    seed=args.seed,
-                    target_mode=args.target_mode,
-                    target_pos=args.target_pos)
+    env = UR5P2PEnv(
+        render_mode=None,
+        seed=args.seed,
+        target_mode=args.target_mode,
+        target_pos=args.target_pos,
+    )
 
     if args.interactive:
         env.reset()

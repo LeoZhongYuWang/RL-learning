@@ -1,0 +1,180 @@
+_wandb:
+    value:
+        cli_version: 0.30.0
+        code_path: code/Algorithms/ppo_continuous_action.py
+        e:
+            0gim38b8fz6kg9v1cz4rdg9uglra1zp6:
+                args:
+                    - --env-id
+                    - RM75Direction-v0
+                    - --exp-name
+                    - RM75-direction-v1
+                    - --init-from
+                    - runs/RM75-v0__RM75-v4-high-success__1__1791429044/RM75-v4-high-success.best.cleanrl_model
+                    - --total-timesteps
+                    - "2000000"
+                    - --num-envs
+                    - "1"
+                    - --learning-rate
+                    - "5e-5"
+                    - --target-sampling
+                    - uniform
+                    - --collision-penalty
+                    - "45"
+                    - --initial-action-std
+                    - "0.15"
+                    - --final-action-std
+                    - "0.06"
+                    - --action-std-hold-fraction
+                    - "0.20"
+                    - --eval-interval
+                    - "100000"
+                    - --eval-episodes
+                    - "100"
+                    - --eval-seed
+                    - "20000"
+                    - --eval-max-collision-rate
+                    - "0.10"
+                    - --eval-target-success
+                    - "0.75"
+                    - --checkpoint-interval
+                    - "100000"
+                    - --track
+                codePath: Algorithms/ppo_continuous_action.py
+                codePathLocal: Algorithms/ppo_continuous_action.py
+                cpu_count: 16
+                cpu_count_logical: 32
+                cudaVersion: "13.0"
+                disk:
+                    /:
+                        total: "340148641792"
+                        used: "205381529600"
+                email: 1823152135@qq.com
+                executable: /home/zhongyu/wzy_master/acRM75-RL-source/.venv/bin/python
+                git:
+                    commit: afa1ccf030d2e6d068884dee8192ec0b03a8462f
+                    remote: https://github.com/niccolasparra/UR5-Reinforcement-Learning.git
+                gpu: NVIDIA GeForce RTX 5060 Laptop GPU
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 3328
+                      memoryTotal: "8546942976"
+                      name: NVIDIA GeForce RTX 5060 Laptop GPU
+                      uuid: GPU-87d06961-7f77-83f1-5d89-f3d80702150b
+                host: zhongyu-ROG-Strix-G16-G614PM-G614PM
+                memory:
+                    total: "32808783872"
+                os: Linux-6.8.0-111-generic-x86_64-with-glibc2.35
+                program: /home/zhongyu/wzy_master/acRM75-RL-source/Algorithms/ppo_continuous_action.py
+                python: CPython 3.10.12
+                root: /home/zhongyu/wzy_master/acRM75-RL-source
+                startedAt: "2026-10-12T09:27:45.766080Z"
+                writerId: 0gim38b8fz6kg9v1cz4rdg9uglra1zp6
+        m: []
+        python_version: 3.10.12
+        t:
+            "1":
+                - 1
+            "2":
+                - 1
+            "3":
+                - 13
+                - 16
+                - 35
+            "4": 3.10.12
+            "5": 0.30.0
+            "12": 0.30.0
+            "13": linux-x86_64
+action_std_hold_fraction:
+    value: 0.2
+anneal_lr:
+    value: true
+batch_size:
+    value: 2048
+capture_video:
+    value: false
+checkpoint_interval:
+    value: 100000
+clip_coef:
+    value: 0.2
+clip_vloss:
+    value: true
+collision_penalty:
+    value: 45
+cuda:
+    value: true
+ent_coef:
+    value: 0.0001
+env_id:
+    value: RM75Direction-v0
+eval_episodes:
+    value: 100
+eval_interval:
+    value: 100000
+eval_max_collision_rate:
+    value: 0.1
+eval_seed:
+    value: 20000
+eval_target_success:
+    value: 0.75
+exp_name:
+    value: RM75-direction-v1
+final_action_std:
+    value: 0.06
+gae_lambda:
+    value: 0.95
+gamma:
+    value: 0.99
+hf_entity:
+    value: ""
+init_from:
+    value: runs/RM75-v0__RM75-v4-high-success__1__1791429044/RM75-v4-high-success.best.cleanrl_model
+initial_action_std:
+    value: 0.15
+learning_rate:
+    value: 5e-05
+max_grad_norm:
+    value: 0.5
+minibatch_size:
+    value: 128
+norm_adv:
+    value: true
+num_envs:
+    value: 1
+num_iterations:
+    value: 976
+num_minibatches:
+    value: 16
+num_steps:
+    value: 2048
+resume_from:
+    value: null
+save_model:
+    value: true
+seed:
+    value: 1
+target_kl:
+    value: 0.02
+target_mode:
+    value: random
+target_pos:
+    value: null
+target_sampling:
+    value: uniform
+torch_deterministic:
+    value: true
+total_timesteps:
+    value: 2000000
+track:
+    value: true
+update_epochs:
+    value: 5
+upload_model:
+    value: false
+vf_coef:
+    value: 0.5
+wandb_entity:
+    value: null
+wandb_project_name:
+    value: rm75

@@ -1,0 +1,19 @@
+{
+  "collision_rate": 0.0,
+  "curriculum_stage": 1,
+  "direction_success_rate": 0.32,
+  "ever_direction_success_rate": 0.45,
+  "ever_position_success_rate": 0.0,
+  "global_step": 100352,
+  "mean_episode_length": 139.98,
+  "mean_final_angle_error_deg": 24.68333273745145,
+  "mean_final_distance": 0.1195611103366912,
+  "mean_min_angle_error_deg": 19.719407417538868,
+  "mean_min_distance": 0.11634661678546067,
+  "mean_min_pose_error": 0.8406359138263553,
+  "meets_acceptance": true,
+  "stage_mastered": true,
+  "stage_mastery_target": 0.7,
+  "strict_success_rate": 0.0,
+  "success_rate": 0.93
+}

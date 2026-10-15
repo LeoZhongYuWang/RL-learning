@@ -1,0 +1,117 @@
+diff --git a/Algorithms/ppo_continuous_action.py b/Algorithms/ppo_continuous_action.py
+index 06baa15..f85c9cb 100644
+--- a/Algorithms/ppo_continuous_action.py
++++ b/Algorithms/ppo_continuous_action.py
+@@ -1,12 +1,13 @@
+ # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
+ import os
+ import random
++import sys
+ import time
+ from dataclasses import dataclass
++from pathlib import Path
+ from typing import Optional, Tuple
+ 
+ import gymnasium as gym
+-import UR5  # noqa: F401  # trigger gym registration side effects
+ import numpy as np
+ import torch
+ import torch.nn as nn
+@@ -15,6 +16,24 @@ import tyro
+ from torch.distributions.normal import Normal
+ from torch.utils.tensorboard import SummaryWriter
+ 
++# Allow this file to be run directly from Algorithms/ while importing the
++# environment module located in the project root.
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++if str(PROJECT_ROOT) not in sys.path:
++    sys.path.insert(0, str(PROJECT_ROOT))
++
++from env import UR5P2PEnv
++
++# Register the local environment without relying on a non-existent `UR5`
++# package.  The guard keeps repeated imports safe in the same Python process.
++if "UR5-v0" not in gym.registry:
++    gym.register(
++        id="UR5-v0",
++        entry_point=UR5P2PEnv,
++        kwargs={"render_mode": None, "target_mode": "random"},
++        max_episode_steps=None,
++    )
++
+ 
+ @dataclass
+ class Args:
+@@ -372,25 +391,36 @@ if __name__ == "__main__":
+         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
+         torch.save(agent.state_dict(), model_path)
+         print(f"model saved to {model_path}")
+-        from cleanrl.cleanrl_utils.evals.ppo_eval import evaluate
+-
+-        episodic_returns = evaluate(
+-            model_path,
+-            lambda env_id, idx, capture_video, run_name, gamma: make_env(
+-                env_id, idx, capture_video, run_name, gamma, args=args
+-            ),
+-            args.env_id,
+-            eval_episodes=10,
+-            run_name=f"{run_name}-eval",
+-            Model=Agent,
+-            device=device,
+-            capture_video=False,
+-            gamma=args.gamma,
+-        )
+-        for idx, episodic_return in enumerate(episodic_returns):
+-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
++        try:
++            from cleanrl_utils.evals.ppo_eval import evaluate
++        except ModuleNotFoundError:
++            evaluate = None
++            print(
++                "CleanRL evaluation helper is not installed; "
++                "the model was saved successfully and automatic evaluation was skipped."
++            )
++
++        episodic_returns = []
++        if evaluate is not None:
++            episodic_returns = evaluate(
++                model_path,
++                lambda env_id, idx, capture_video, run_name, gamma: make_env(
++                    env_id, idx, capture_video, run_name, gamma, args=args
++                ),
++                args.env_id,
++                eval_episodes=10,
++                run_name=f"{run_name}-eval",
++                Model=Agent,
++                device=device,
++                capture_video=False,
++                gamma=args.gamma,
++            )
++            for idx, episodic_return in enumerate(episodic_returns):
++                writer.add_scalar("eval/episodic_return", episodic_return, idx)
+ 
+         if args.upload_model:
++            if evaluate is None:
++                raise RuntimeError("Model upload requires the CleanRL evaluation helpers.")
+             from cleanrl_utils.huggingface import push_to_hub
+ 
+             repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
+diff --git a/env.py b/env.py
+index 8ef0324..54a40e9 100644
+--- a/env.py
++++ b/env.py
+@@ -675,10 +675,12 @@ if __name__ == "__main__":
+     parser.add_argument("--target-pos", type=float, nargs=3, default=None)
+     args = parser.parse_args()
+ 
+-    env = UR5P2PEnv(render_mode="human" if args.interactive else None,
++    env = UR5P2PEnv(
++                    render_mode=None,
+                     seed=args.seed,
+                     target_mode=args.target_mode,
+-                    target_pos=args.target_pos)
++                    target_pos=args.target_pos,
++                   )
+ 
+     if args.interactive:
+         env.reset()

@@ -1,0 +1,152 @@
+{
+  "scope": "Document-only audit; no code/model/cloud changes",
+  "protected_sha256": {
+    "/home/zhongyu/wzy_master/acRM75-RL-source/env_rm75.py": "87beda6315b739ccfbee4d5326eeb6deb0023d2793aadc514c4a9c8b02eb4e46",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/env.py": "dc2c7e42a1be362a5bac5ab9db670da8d165f331decb6f7113b3fcb4e9da8f08",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/ik.py": "3ab6b5055f0cb58eb6b4f00c008d0ecf405fbdcdc2e33727323a9c261de88ac6",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/__init__.py": "b53ca9ea7a05e98c626734dc940b1330993b5f6a513a97141ac7c042c56de3e9",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/ik_solver.py": "9845d7c0af06e27daecd540b882c9e3fef6bb55703313ea2ac6d189db0f898a8",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/Algorithms/td3_ur5.py": "3a84fb8401072db790f610db2ddf59f94db1eb77d7f7684c8785012a23812e54",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/Algorithms/ppo_continuous_action.py": "9f99c6076ebff3f7195272d052cbdae040d23eeaad2d749a2feced583f84fe72",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/Scripts/record_hd.py": "f9b5765077f2388f77bcf69c60313c2d25852a51de42ee5a5bef24d78ed84a11",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/Scripts/visualize_agent.py": "0c3764f72b6b4b7760a966c9b1ce41470fed3c3d7a02ba7fdccb275475ac319a",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/Scripts/train_rm75_v4.sh": "56055e14c1299ca22cf92105ba7a2907c7779f2892dc530d62a3fe292e448a45",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/Scripts/train_rm75_direction.sh": "931c49c55884937f4517f7a30e16f1bad25bc824ddbf0befb50e1bdc2715bf45",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/tests/test_rm75_policy_arrival.py": "5f4a42b3adb180ed3e8456c9cae8109237f2283239101d24c0266c1bcb0f5206",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/tests/test_ur5_training_contract.py": "1efdb9983fae7f070c01f2a281ea60927e68fe70604c8b289efc2196b0e0b778",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/tests/test_rm75_v4_contract.py": "a92cd81ea7e56ef9c5ce692c5eeda9f3f571e08987b7b1833efa651f90e1b571",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/tests/test_rm75_model.py": "c730161f932b9c03e41e978f0f08cdc4256cc0363ab71440e59eb461879cbbd3",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/tests/test_rm75_direction_contract.py": "bcb8e4a606e236224f37b3b002a3f6e83587d13dee47d9fb138787e786f7b1c4",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/tests/checkpoint_roundtrip_worker.py": "20d503e78c0b60295d3a0b05655cf93225c986de96a97d283872db60b5294fea",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/tests/test_rm75_mixed_start.py": "10d6bee197240cb26739389575d8817b48a8e31eb2006ed43ec0970f1caecbe8",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/tools/convert_rm75_urdf.py": "9471e3155727bb9d95082192536df88aca154be546f6045f1a01afcef85287a3",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/assets/ur5e.xml": "ffd0a7b336d3c2d27c35a15cc0d4aaa95196769aca190ac8d6522d3318c345a0",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/assets/scene.xml": "74a77bb372e50947fcf1e6a347e3730eaa157da1e9d78b96b9d2b2bdbb0c9f9b",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/assets/rm75/rm75.xml": "dac7c1286ba82a8d03e4623cb4db347e76e5c991cec75d452b3af0e394f163ec",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/assets/rm75/rm75_imported.xml": "9f66edfdfbb9d2777d020ac0f042f22c9f37009d2ee6e4c9dfe470d0eb26072a",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/assets/rm75/scene.xml": "58697b533f079d7fc3896a8835fed8500f940dc4d87fc222a7f0bb43b423a46a",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/RM75Direction-v0__RM75-direction-v5-near-coordination__1__1791859371/RM75-direction-v5-near-coordination.best.cleanrl_model": "84eec15265c2815721396e6a21480f82d3b84f87ef3f333cdb4dd6fdc12c15db",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/UR5-v3/events.out.tfevents.1790669802.zhongyu-ROG-Strix-G16-G614PM-G614PM.790930.0": "c204ba8b69041b8ec71081efa6e0da2b4cd3f3284d0120bdf718e982ec85c786",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/UR5-v3/ppo_continuous_action.cleanrl_model": "dc3655b0cf51ae3d6703c6ec0721202bb668e759d7f151d4ecdb6a45687218d1",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/RM75-v0__RM75-v4-high-success__1__1791429044/RM75-v4-high-success.cleanrl_model": "6eb6ee9324a9527a861323bd3e83fea821a7f11a52aa501ab752a9d0b41dcd0e",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/RM75-v0__RM75-v4-high-success__1__1791429044/RM75-v4-high-success.best.cleanrl_model": "75ebb95c10b4fb309fafc450fa9ba1c89ad6310b65f8adc0c054fbd67cd8a44c",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/RM75-v0__RM75-v4-high-success__1__1791429044/events.out.tfevents.1791429047.zhongyu-ROG-Strix-G16-G614PM-G614PM.29815.0": "5f44ec57aef8910c8662280f79f592c292db02ec39eb1f6f651e4cfcfc615195",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/RM75-v0__RM75-v4-high-success__1__1791429044/checkpoints/checkpoint_latest.pt": "5375f547b80420f85f35523fa0b1f4276291fccd157915220ee97d3fc9f62424",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/RM75Direction-v0__RM75-direction-v6-finetune__1__1791869875/RM75-direction-v6-finetune.best.cleanrl_model": "aa9429e7135f2160036a4c316223add96fed06e50ed9fca2e584f5271e6aa061",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/RM75Direction-v0__RM75-direction-v6-finetune__1__1791869875/RM75-direction-v6-finetune.cleanrl_model": "445b35951adf704d453270ccb061bbfd15e36761046025abe8d7240d1f45f817",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/RM75Direction-v0__RM75-direction-v6-finetune__1__1791869875/events.out.tfevents.1791869878.zhongyu-ROG-Strix-G16-G614PM-G614PM.49539.0": "5431fe9c10a485de37268c2be6b2b9c9bd88410b7ba2594351f016ede1ab0384",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/RM75Direction-v0__RM75-direction-v6-finetune__1__1791869875/checkpoints/checkpoint_latest.pt": "6236e13047ad2b504d0bee9203e55b69e872b4e738873d23b9a7260028843972",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/RM75-v3/ppo_continuous_action.cleanrl_model": "57aebf2287478f2769de74346067f5374e3c8fcf538b96a4952743fc05cef1fe",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/RM75-v3/events.out.tfevents.1790740530.zhongyu-ROG-Strix-G16-G614PM-G614PM.53592.0": "cdee4d6acf5d0d4b3ffbf681c5e763daef2d584b031c395a23b7477b67fae51d",
+    "/home/zhongyu/wzy_master/acRM75-RL-source/.venv/bin/activate": "dc453885af367f420f381a04a5e34b1892741fdd6fdb2a90c6e7312c7e32828f",
+    "/home/zhongyu/wzy_master/acRM75-RL/env_rm75.py": "b97a1e85e99beb5a66d1f8cd0633cb4be3fc5aef8a01b500856c665d8d356cdc",
+    "/home/zhongyu/wzy_master/acRM75-RL/README.md": "a0b1b6cbc5b07b3900219db2baaae5d2259766b73cc979558e6fde7a70074137"
+  },
+  "modified_documents": [
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/README_zh-CN.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/archive/docs-before-audit-20261013/README_zh-CN.md",
+      "old_sha256": "7a9373195cf3d898edee2f4e7e2a56489c656a805bc5e8608435ee4863fc2300"
+    },
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/CODE_GUIDE_zh-CN.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/archive/docs-before-audit-20261013/CODE_GUIDE_zh-CN.md",
+      "old_sha256": "06c68a043282b91e02a712d49d29557df3e55b07e6206c9ff6d0d5808c398190"
+    },
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/PPO_CONTINUOUS_ACTION_GUIDE_zh-CN.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/archive/docs-before-audit-20261013/PPO_CONTINUOUS_ACTION_GUIDE_zh-CN.md",
+      "old_sha256": "4c4734b83be60c68093c1309623126bb9f1a8f0508382decf4ee2db28334b555"
+    },
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/MODEL_EVOLUTION_GUIDE_zh-CN.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/archive/docs-before-audit-20261013/MODEL_EVOLUTION_GUIDE_zh-CN.md",
+      "old_sha256": "9903ccf00873d49042ca8c0e2482681a1c4cfa76adaa7584c99e3a39c7d3fe72"
+    },
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/RM75_V4_CODE_EVOLUTION_REPORT_zh-CN.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/archive/docs-before-audit-20261013/RM75_V4_CODE_EVOLUTION_REPORT_zh-CN.md",
+      "old_sha256": "7512dd3c207e32d2fae49c7b101749c3403b9fc43468f95ec26ac10c3b09d377"
+    },
+    {
+      "path": "/home/zhongyu/文档/ChatGPT/RL/RM75_V4_CODE_EVOLUTION_REPORT_zh-CN.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/workspace-original/RM75_V4_CODE_EVOLUTION_REPORT_zh-CN.md",
+      "old_sha256": "7512dd3c207e32d2fae49c7b101749c3403b9fc43468f95ec26ac10c3b09d377"
+    }
+  ],
+  "deleted_documents": [
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/docs/superpowers/plans/2026-10-08-rm75-final-curriculum-cleanup.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/source/docs/superpowers/plans/2026-10-08-rm75-final-curriculum-cleanup.md",
+      "sha256": "b107d60afbd0d4af1f6b3d3d80307b1e3ccef6c82922b846edc613f1edcf5b88"
+    },
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/docs/superpowers/plans/2026-10-09-rm75-pure-ppo-pose.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/source/docs/superpowers/plans/2026-10-09-rm75-pure-ppo-pose.md",
+      "sha256": "62fd9675945579cfa9dff64c4c34739209d7caae4a56b56d9de1f2fde3272844"
+    },
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/docs/superpowers/plans/2026-10-09-rm75-pure-ppo-pose-spec.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/source/docs/superpowers/plans/2026-10-09-rm75-pure-ppo-pose-spec.md",
+      "sha256": "c1b2204b92ed6a09f3fe9e4d16d418b46ec5f8ee854ea0506fb6a8cbd47b1c74"
+    },
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/docs/superpowers/plans/2026-10-09-rm75-approach-4m.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/source/docs/superpowers/plans/2026-10-09-rm75-approach-4m.md",
+      "sha256": "4bc713c1353d14d070dd494efa5f84c057b1b49fb1a4ae87f753e961a81954e1"
+    },
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/docs/superpowers/plans/2026-10-08-rm75-approach-v4-gradual-curriculum.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/source/docs/superpowers/plans/2026-10-08-rm75-approach-v4-gradual-curriculum.md",
+      "sha256": "a02230ec5b5f159c1350aa589911985bfbacbc0d72ed7c4b0bab62429f3d767d"
+    },
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/docs/superpowers/plans/2026-10-08-rm75-random-approach-v2.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/source/docs/superpowers/plans/2026-10-08-rm75-random-approach-v2.md",
+      "sha256": "e72c92ef920972428bed589f91cff2bf2c857c6aa07874980ddfbf353e5c2d41"
+    },
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/docs/superpowers/plans/2026-10-08-rm75-approach-v3-mastery-curriculum.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/source/docs/superpowers/plans/2026-10-08-rm75-approach-v3-mastery-curriculum.md",
+      "sha256": "74afc41ef8e93e652ead26017d28d0add196ec45ba676330034e921df47879eb"
+    },
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/docs/superpowers/plans/2026-10-08-rm75-v5-best-finetune.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/source/docs/superpowers/plans/2026-10-08-rm75-v5-best-finetune.md",
+      "sha256": "6b75ba591edca052127227fe7932793b5b61f0130024657e523e47a8d231754a"
+    },
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/docs/superpowers/plans/2026-10-09-rm75-stage2-recovery.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/source/docs/superpowers/plans/2026-10-09-rm75-stage2-recovery.md",
+      "sha256": "1dff0464ab6b41f1f932f8a1a10f665a1dbe7e3b141459f7947a09809f6b519d"
+    },
+    {
+      "path": "/home/zhongyu/wzy_master/acRM75-RL-source/docs/superpowers/specs/2026-10-08-rm75-final-training-audit.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/source/docs/superpowers/specs/2026-10-08-rm75-final-training-audit.md",
+      "sha256": "1b4f9ff954370edb9f97bef74d7d6f56811dae059a4a8dc3b2760434e2fa5484"
+    },
+    {
+      "path": "/home/zhongyu/文档/ChatGPT/RL/RM75_POSE_RETENTION_2026-10-09.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/workspace/RM75_POSE_RETENTION_2026-10-09.md",
+      "sha256": "ed002d4d26a1b32167f2113f65ea6c5ad481480655fa75fda2d4fc670b61fe78"
+    },
+    {
+      "path": "/home/zhongyu/文档/ChatGPT/RL/post-v4-pose-backup-README.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/workspace/post-v4-pose-backup-README.md",
+      "sha256": "69d38d7dbc1f8600c68cde8eb5efb777a36fbcc28fc697a71046f79fb1294b05"
+    },
+    {
+      "path": "/home/zhongyu/文档/ChatGPT/RL/docs/superpowers/plans/2026-10-09-rm75-v8-parallel-curriculum.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/workspace/docs/superpowers/plans/2026-10-09-rm75-v8-parallel-curriculum.md",
+      "sha256": "cc2d84ebc48e4af4d735ec9568ff843412c035175bed9d4a38247146eef0adad"
+    },
+    {
+      "path": "/home/zhongyu/文档/ChatGPT/RL/docs/superpowers/plans/2026-10-09-rm75-v9-strict-terminal.md",
+      "backup": "/home/zhongyu/wzy_master/acRM75-RL-source/.trash/docs-cleanup-20261013/workspace/docs/superpowers/plans/2026-10-09-rm75-v9-strict-terminal.md",
+      "sha256": "ff51022bf043dbb72f8a4d4e4baa49d1192a5ae1d6754f162808379190f7f12b"
+    }
+  ],
+  "absent_before_patch": [
+    "/home/zhongyu/wzy_master/acRM75-RL-source/runs/README_RM75_RESULTS.md"
+  ]
+}

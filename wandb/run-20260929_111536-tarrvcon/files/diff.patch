@@ -1,0 +1,233 @@
+diff --git a/Algorithms/ppo_continuous_action.py b/Algorithms/ppo_continuous_action.py
+index 06baa15..f85c9cb 100644
+--- a/Algorithms/ppo_continuous_action.py
++++ b/Algorithms/ppo_continuous_action.py
+@@ -1,12 +1,13 @@
+ # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
+ import os
+ import random
++import sys
+ import time
+ from dataclasses import dataclass
++from pathlib import Path
+ from typing import Optional, Tuple
+ 
+ import gymnasium as gym
+-import UR5  # noqa: F401  # trigger gym registration side effects
+ import numpy as np
+ import torch
+ import torch.nn as nn
+@@ -15,6 +16,24 @@ import tyro
+ from torch.distributions.normal import Normal
+ from torch.utils.tensorboard import SummaryWriter
+ 
++# Allow this file to be run directly from Algorithms/ while importing the
++# environment module located in the project root.
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++if str(PROJECT_ROOT) not in sys.path:
++    sys.path.insert(0, str(PROJECT_ROOT))
++
++from env import UR5P2PEnv
++
++# Register the local environment without relying on a non-existent `UR5`
++# package.  The guard keeps repeated imports safe in the same Python process.
++if "UR5-v0" not in gym.registry:
++    gym.register(
++        id="UR5-v0",
++        entry_point=UR5P2PEnv,
++        kwargs={"render_mode": None, "target_mode": "random"},
++        max_episode_steps=None,
++    )
++
+ 
+ @dataclass
+ class Args:
+@@ -372,25 +391,36 @@ if __name__ == "__main__":
+         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
+         torch.save(agent.state_dict(), model_path)
+         print(f"model saved to {model_path}")
+-        from cleanrl.cleanrl_utils.evals.ppo_eval import evaluate
+-
+-        episodic_returns = evaluate(
+-            model_path,
+-            lambda env_id, idx, capture_video, run_name, gamma: make_env(
+-                env_id, idx, capture_video, run_name, gamma, args=args
+-            ),
+-            args.env_id,
+-            eval_episodes=10,
+-            run_name=f"{run_name}-eval",
+-            Model=Agent,
+-            device=device,
+-            capture_video=False,
+-            gamma=args.gamma,
+-        )
+-        for idx, episodic_return in enumerate(episodic_returns):
+-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
++        try:
++            from cleanrl_utils.evals.ppo_eval import evaluate
++        except ModuleNotFoundError:
++            evaluate = None
++            print(
++                "CleanRL evaluation helper is not installed; "
++                "the model was saved successfully and automatic evaluation was skipped."
++            )
++
++        episodic_returns = []
++        if evaluate is not None:
++            episodic_returns = evaluate(
++                model_path,
++                lambda env_id, idx, capture_video, run_name, gamma: make_env(
++                    env_id, idx, capture_video, run_name, gamma, args=args
++                ),
++                args.env_id,
++                eval_episodes=10,
++                run_name=f"{run_name}-eval",
++                Model=Agent,
++                device=device,
++                capture_video=False,
++                gamma=args.gamma,
++            )
++            for idx, episodic_return in enumerate(episodic_returns):
++                writer.add_scalar("eval/episodic_return", episodic_return, idx)
+ 
+         if args.upload_model:
++            if evaluate is None:
++                raise RuntimeError("Model upload requires the CleanRL evaluation helpers.")
+             from cleanrl_utils.huggingface import push_to_hub
+ 
+             repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
+diff --git a/README.md b/README.md
+index 2544a13..04f9298 100644
+--- a/README.md
++++ b/README.md
+@@ -25,9 +25,8 @@ This project implements, tunes, and benchmarks two state-of-the-art deep reinfor
+ ---
+ 
+ ## Demo
+-[Watch Demo Video!](https://github.com/niccolasparra/UR5-Reinforcement-Learning/issues/1#issue-4107960304)
+-   
+ 
++[Watch Demo Video!](https://github.com/niccolasparra/UR5-Reinforcement-Learning/issues/1#issue-4107960304)
+ 
+ > _A trained agent controlling the UR5 arm to reach a target pose in real time._
+ 
+@@ -47,13 +46,13 @@ The core challenge: **How do you get a neural network to learn smooth, collision
+ 
+ A custom **Gymnasium environment** built on top of MuJoCo that simulates the UR5e robotic arm with full rigid-body dynamics.
+ 
+-| Component | Details |
+-|---|---|
++| Component                   | Details                                                                                                                     |
++| --------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+ | **Observation Space** | 19D vector: joint positions (6) + joint velocities (6) + end-effector position (3) + goal position (3) + collision flag (1) |
+-| **Action Space** | 6D continuous: per-joint velocity deltas, bounded at ±0.05 rad/step |
+-| **Physics** | MuJoCo with 10 substeps per action, PD position controller with gravity compensation (Kp=2000, Kd=400) |
+-| **Episode** | Max 1024 steps. Terminates on success (EE within 5cm of goal) or collision |
+-| **Goal Sampling** | Randomized target positions within the robot's reachable workspace at each episode reset |
++| **Action Space**      | 6D continuous: per-joint velocity deltas, bounded at ±0.05 rad/step                                                        |
++| **Physics**           | MuJoCo with 10 substeps per action, PD position controller with gravity compensation (Kp=2000, Kd=400)                      |
++| **Episode**           | Max 1024 steps. Terminates on success (EE within 5cm of goal) or collision                                                  |
++| **Goal Sampling**     | Randomized target positions within the robot's reachable workspace at each episode reset                                    |
+ 
+ ### Reward Function Design
+ 
+@@ -63,14 +62,14 @@ The reward function is the single most critical design decision in any RL system
+ R(s, a, s') = progress + distance_penalty + orientation + collision + success + time_penalty
+ ```
+ 
+-| Component | Formula | Purpose |
+-|---|---|---|
+-| **Progress** | `10.0 × (d_prev - d) / max(d, 1e-6)` | Rewards getting closer to the goal |
+-| **Distance Penalty** | `-0.5 × d` | Continuous pressure to minimize distance |
+-| **Collision** | `-10.0` on contact | Hard penalty for unsafe trajectories |
+-| **Success Bonus** | `+100.0` when `d < 0.05m` | Clear terminal reward signal |
+-| **Time** | `-0.01` per step | Encourages efficiency |
+-| **Orientation** | `w × (alignment)^2` | Optional alignment of EE axis with target |
++| Component                  | Formula                                 | Purpose                                   |
++| -------------------------- | --------------------------------------- | ----------------------------------------- |
++| **Progress**         | `10.0 × (d_prev - d) / max(d, 1e-6)` | Rewards getting closer to the goal        |
++| **Distance Penalty** | `-0.5 × d`                           | Continuous pressure to minimize distance  |
++| **Collision**        | `-10.0` on contact                    | Hard penalty for unsafe trajectories      |
++| **Success Bonus**    | `+100.0` when `d < 0.05m`           | Clear terminal reward signal              |
++| **Time**             | `-0.01` per step                      | Encourages efficiency                     |
++| **Orientation**      | `w × (alignment)^2`                  | Optional alignment of EE axis with target |
+ 
+ **Key design insight:** normalizing the progress reward by `max(d, 1e-6)` creates a relative improvement signal — the agent gets proportionally more reward for small improvements when it's already close to the goal, producing better fine-grained positioning behavior.
+ 
+@@ -153,6 +152,7 @@ pip install -r requirements.txt
+ ### Training
+ 
+ **Train PPO:**
++
+ ```bash
+ python Algorithms/ppo_continuous_action.py \
+     --total-timesteps 1000000 \
+@@ -162,6 +162,7 @@ python Algorithms/ppo_continuous_action.py \
+ ```
+ 
+ **Train TD3:**
++
+ ```bash
+ python Algorithms/td3_ur5.py \
+     --total-timesteps 500000 \
+@@ -193,13 +194,13 @@ python Scripts/record_hd.py
+ 
+ > _Tracked with Weights & Biases. PPO (blue) reaches >85% success rate with fast, monotonic convergence. TD3 (orange) converges more slowly but steadily climbs to ~67% within the same training window._
+ 
+-| Metric | PPO | TD3 |
+-|---|---|---|
+-| **Peak Success Rate** | **>85%** | ~67% |
+-| **Convergence Speed** | Fast — 80% by ~4K episodes | Gradual — 67% by ~8K episodes |
+-| **Training Stability** | High — smooth, monotonic curve | Moderate — slower ramp-up |
+-| **Trajectory Quality** | Smooth, conservative paths | Direct, efficient paths |
+-| **Sample Efficiency** | Lower (on-policy) | Higher (off-policy replay buffer) |
++| Metric                       | PPO                             | TD3                               |
++| ---------------------------- | ------------------------------- | --------------------------------- |
++| **Peak Success Rate**  | **>85%**                  | ~67%                              |
++| **Convergence Speed**  | Fast — 80% by ~4K episodes     | Gradual — 67% by ~8K episodes    |
++| **Training Stability** | High — smooth, monotonic curve | Moderate — slower ramp-up        |
++| **Trajectory Quality** | Smooth, conservative paths      | Direct, efficient paths           |
++| **Sample Efficiency**  | Lower (on-policy)               | Higher (off-policy replay buffer) |
+ 
+ **Takeaway:** PPO significantly outperformed TD3 in this task, reaching >85% success rate with fast, stable convergence. TD3's slower ramp-up is expected — off-policy methods require filling the replay buffer before meaningful learning begins, and the exploration noise parameters may need further tuning for this specific action space. Both algorithms demonstrate that the environment and reward function are well-designed: the agents learn consistently and improve monotonically, which is a strong signal that the MDP formulation is sound.
+ 
+@@ -211,7 +212,7 @@ python Scripts/record_hd.py
+ - **RL Framework**: [CleanRL](https://github.com/vwxyzjn/cleanrl) — single-file RL implementations
+ - **Environment API**: [Gymnasium](https://gymnasium.farama.org/) — standard RL interface
+ - **Deep Learning**: [PyTorch](https://pytorch.org/) — neural network training
+-- **Experiment Tracking**: [Weights & Biases](https://wandb.ai/) + TensorBoard
++- **Experiment Tracking**: [Weights &amp; Biases](https://wandb.ai/) + TensorBoard
+ - **Robot Model**: [UR5e](https://www.universal-robots.com/products/ur5-robot/) from MuJoCo Menagerie
+ 
+ ---
+@@ -223,9 +224,7 @@ The results confirm that the system is **well-architected**: both algorithms lea
+ That said, there is clear room to push performance further. The three highest-leverage improvements I'd prioritize next:
+ 
+ 1. **Reward normalization.** The current reward components operate at different scales (progress ∈ [-10, 10], success = +100, time = -0.01). Normalizing these to a common range — or using a running reward standardization layer — would give the optimizer a smoother loss landscape and likely accelerate convergence for both algorithms.
+-
+ 2. **Exploration noise reduction for TD3.** TD3's slower convergence suggests that `exploration_noise=0.1` may be too aggressive for the UR5's tight action bounds (±0.05 rad/step). Decaying the noise schedule over training, or switching to parameter-space noise, could significantly improve TD3's sample efficiency and close the gap with PPO.
+-
+ 3. **Discount factor (γ) tuning.** Both algorithms use γ=0.99, which creates a long effective planning horizon (~100 steps). For a reaching task where episodes are often solved in fewer steps, a lower γ (0.95–0.98) could stabilize value estimates and reduce variance in the critic's predictions — especially for TD3, where Q-value accuracy directly impacts policy quality.
+ 
+ Beyond hyperparameters, the natural next steps are **domain randomization** (varying object mass, friction, and joint damping) for sim-to-real transfer, and **curriculum learning** to progressively increase goal difficulty.
+diff --git a/env.py b/env.py
+index 8ef0324..a1f6fc6 100644
+--- a/env.py
++++ b/env.py
+@@ -674,11 +674,13 @@ if __name__ == "__main__":
+                         help="How to set goal position: fixed|random|none (random uses built-in region)")
+     parser.add_argument("--target-pos", type=float, nargs=3, default=None)
+     args = parser.parse_args()
+-
+-    env = UR5P2PEnv(render_mode="human" if args.interactive else None,
++ 
++    env = UR5P2PEnv(
++                    render_mode=None,
+                     seed=args.seed,
+                     target_mode=args.target_mode,
+-                    target_pos=args.target_pos)
++                    target_pos=args.target_pos,
++                   )
+ 
+     if args.interactive:
+         env.reset()
