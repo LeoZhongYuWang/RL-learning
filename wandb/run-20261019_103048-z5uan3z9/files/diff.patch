@@ -1,0 +1,3381 @@
+diff --git a/Algorithms/ppo_continuous_action.py b/Algorithms/ppo_continuous_action.py
+index 63913fe..84e1996 100644
+--- a/Algorithms/ppo_continuous_action.py
++++ b/Algorithms/ppo_continuous_action.py
+@@ -11,7 +11,7 @@ from pathlib import Path
+ from typing import Optional, Tuple
+ 
+ import gymnasium as gym
+-import mujoco as mj
++# import mujoco as mj
+ import numpy as np
+ import torch
+ import torch.nn as nn
+@@ -47,17 +47,17 @@ if "RM75-v0" not in gym.registry:
+         max_episode_steps=None,
+     )
+ 
+-if "RM75Direction-v0" not in gym.registry:
+-    gym.register(
+-        id="RM75Direction-v0",
+-        entry_point=RM75P2PEnv,
+-        kwargs={
+-            "render_mode": None,
+-            "target_mode": "random",
+-            "require_direction": True,
+-        },
+-        max_episode_steps=None,
+-    )
++# if "RM75Direction-v0" not in gym.registry:
++#     gym.register(
++#         id="RM75Direction-v0",
++#         entry_point=RM75P2PEnv,
++#         kwargs={
++#             "render_mode": None,
++#             "target_mode": "random",
++#             "require_direction": True,
++#         },
++#         max_episode_steps=None,
++#     )
+ 
+ @dataclass
+ class Args:
+@@ -96,7 +96,7 @@ class Args:
+     """the number of steps to run in each environment per policy rollout"""
+     anneal_lr: bool = True
+     """Toggle learning rate annealing for policy and value networks"""
+-    gamma: float = 0.99
++    gamma: float = 0.995
+     """the discount factor gamma"""
+     gae_lambda: float = 0.95
+     """the lambda for the general advantage estimation"""
+@@ -129,14 +129,14 @@ class Args:
+     """goal sampling mode passed to UR5 environment"""
+     target_pos: Optional[Tuple[float, float, float]] = None
+     """explicit goal position when target_mode=='fixed'"""
+-    target_sampling: str = "uniform"
+-    """random-goal sampler: uniform or hard_mixture"""
++    dist_success_thresh: float = 0.05
++    """RM75 point-reaching success distance in meters"""
+     collision_penalty: float = 75.0
+     """RM75 collision reward penalty; collision still terminates the episode"""
+-    near_start_probability: float = 0.0
+-    """direction-task fraction requesting near-goal training starts; 0 preserves full starts"""
+-    near_start_from: Optional[str] = None
+-    """frozen policy preparing arrival starts during training only; None uses IK starts"""
++    # near_start_probability: float = 0.0
++    # """direction-task fraction requesting near-goal training starts; 0 preserves full starts"""
++    # near_start_from: Optional[str] = None
++    # """frozen policy preparing arrival starts during training only; None uses IK starts"""
+     eval_interval: int = 0
+     """environment steps between deterministic evaluations; 0 disables them"""
+     eval_episodes: int = 100
+@@ -164,31 +164,32 @@ def environment_kwargs(env_id, args: Args, *, render_mode=None):
+         "target_mode": args.target_mode,
+         "target_pos": args.target_pos,
+     }
+-    if env_id in {"RM75-v0", "RM75Direction-v0"}:
++    # if env_id in {"RM75-v0", "RM75Direction-v0"}:
++    if env_id == "RM75-v0":
+         kwargs.update({
+-            "target_sampling": args.target_sampling,
+             "collision_penalty": args.collision_penalty,
++            "dist_success_thresh": args.dist_success_thresh,
+         })
+-    if env_id == "RM75Direction-v0":
+-        kwargs["near_start_probability"] = args.near_start_probability
++    # if env_id == "RM75Direction-v0":
++    #     kwargs["near_start_probability"] = args.near_start_probability
+     return kwargs
+ 
+ 
+ def make_env(env_id, *, args: Args):
+     def thunk():
+         kwargs = environment_kwargs(env_id, args, render_mode=None)
+-        arrival_starts = (
+-            env_id == "RM75Direction-v0" and args.near_start_from is not None
+-            and args.near_start_probability > 0.0
+-        )
+-        if arrival_starts:
+-            kwargs["near_start_probability"] = 0.0  # Prefix starts from the original pose.
++        # arrival_starts = (
++        #     env_id == "RM75Direction-v0" and args.near_start_from is not None
++        #     and args.near_start_probability > 0.0
++        # )
++        # if arrival_starts:
++        #     kwargs["near_start_probability"] = 0.0  # Prefix starts from the original pose.
+         env = gym.make(
+             env_id,
+             **kwargs,
+         )
+-        if arrival_starts:
+-            env = ArrivalStartWrapper(env, args.near_start_from, args.near_start_probability)
++        # if arrival_starts:
++        #     env = ArrivalStartWrapper(env, args.near_start_from, args.near_start_probability)
+         env = gym.wrappers.RecordEpisodeStatistics(env)
+         return env
+ 
+@@ -390,44 +391,44 @@ def load_agent_weights(path, agent, device):
+     target_obs_dim = int(target_state["actor_mean.0.weight"].shape[1])
+     if source_obs_dim == target_obs_dim:
+         agent.load_state_dict(state_dict, strict=True)
+-    elif source_obs_dim == 28 and target_obs_dim == 31:
+-        # Preserve the validated 28-D point-reaching policy. The three new
+-        # direction-error inputs start with zero influence and are learned by
+-        # fine-tuning; every other compatible parameter is copied exactly.
+-        expanded_state = {}
+-        expandable_keys = {
+-            "actor_mean.0.weight",
+-            "critic.0.weight",
+-        }
+-        for key, target_value in target_state.items():
+-            if key not in state_dict:
+-                raise ValueError(f"initialization is missing parameter {key}")
+-            source_value = state_dict[key]
+-            if key in expandable_keys:
+-                if (
+-                    source_value.shape[0] != target_value.shape[0]
+-                    or source_value.shape[1] != 28
+-                    or target_value.shape[1] != 31
+-                ):
+-                    raise ValueError(
+-                        f"unsupported input-layer shapes for {key}: "
+-                        f"{tuple(source_value.shape)} -> {tuple(target_value.shape)}"
+-                    )
+-                expanded = torch.zeros_like(target_value)
+-                expanded[:, :28] = source_value.to(
+-                    device=expanded.device,
+-                    dtype=expanded.dtype,
+-                )
+-                expanded_state[key] = expanded
+-            elif source_value.shape == target_value.shape:
+-                expanded_state[key] = source_value
+-            else:
+-                raise ValueError(
+-                    f"unsupported parameter shape for {key}: "
+-                    f"{tuple(source_value.shape)} -> {tuple(target_value.shape)}"
+-                )
+-        agent.load_state_dict(expanded_state, strict=True)
+-        source_kind += "_expanded_28_to_31"
++    # elif source_obs_dim == 28 and target_obs_dim == 31:
++    #     # Preserve the validated 28-D point-reaching policy. The three new
++    #     # direction-error inputs start with zero influence and are learned by
++    #     # fine-tuning; every other compatible parameter is copied exactly.
++    #     expanded_state = {}
++    #     expandable_keys = {
++    #         "actor_mean.0.weight",
++    #         "critic.0.weight",
++    #     }
++    #     for key, target_value in target_state.items():
++    #         if key not in state_dict:
++    #             raise ValueError(f"initialization is missing parameter {key}")
++    #         source_value = state_dict[key]
++    #         if key in expandable_keys:
++    #             if (
++    #                 source_value.shape[0] != target_value.shape[0]
++    #                 or source_value.shape[1] != 28
++    #                 or target_value.shape[1] != 31
++    #             ):
++    #                 raise ValueError(
++    #                     f"unsupported input-layer shapes for {key}: "
++    #                     f"{tuple(source_value.shape)} -> {tuple(target_value.shape)}"
++    #                 )
++    #             expanded = torch.zeros_like(target_value)
++    #             expanded[:, :28] = source_value.to(
++    #                 device=expanded.device,
++    #                 dtype=expanded.dtype,
++    #             )
++    #             expanded_state[key] = expanded
++    #         elif source_value.shape == target_value.shape:
++    #             expanded_state[key] = source_value
++    #         else:
++    #             raise ValueError(
++    #                 f"unsupported parameter shape for {key}: "
++    #                 f"{tuple(source_value.shape)} -> {tuple(target_value.shape)}"
++    #             )
++    #     agent.load_state_dict(expanded_state, strict=True)
++    #     source_kind += "_expanded_28_to_31"
+     else:
+         raise ValueError(
+             "unsupported observation-size transfer: "
+@@ -436,51 +437,51 @@ def load_agent_weights(path, agent, device):
+     return source_kind
+ 
+ 
+-class ArrivalStartWrapper(gym.Wrapper):
+-    """Training-only reset preparation; prefix actions never enter PPO batches."""
+-    prefix_limit = 512
+-
+-    def __init__(self, env, model_path, probability):
+-        super().__init__(env)
+-        if not self.unwrapped.require_direction or self.unwrapped.near_start_probability != 0:
+-            raise ValueError("arrival starts require a direction environment with IK near starts disabled")
+-        if not np.isfinite(probability) or not 0.0 <= probability <= 1.0:
+-            raise ValueError("arrival-start probability must be in [0, 1]")
+-        self.probability = float(probability)
+-        self.teacher = Agent(env)
+-        load_agent_weights(model_path, self.teacher, "cpu")
+-        self.teacher.eval().requires_grad_(False)
+-
+-    def reset(self, *, seed=None, options=None):
+-        obs, info = self.env.reset(seed=seed, options=options)
+-        base = self.unwrapped
+-        if self.probability == 0.0 or base.rng.random() >= self.probability:
+-            return obs, info
+-        base.near_start_requested = True
+-        spec = mj.mjtState.mjSTATE_INTEGRATION
+-        saved = np.empty(mj.mj_stateSize(base.model, spec))
+-        mj.mj_getState(base.model, base.data, saved, spec)
+-        q_target = base.q_target.copy()
+-        for _ in range(min(self.prefix_limit, base.horizon)):
+-            with torch.no_grad():
+-                action = torch.tanh(self.teacher.actor_mean(
+-                    torch.as_tensor(obs[None], dtype=torch.float32),
+-                ))[0].numpy()
+-            obs, _, terminated, truncated, info = self.env.step(action)
+-            base.arrival_prefix_steps += 1
+-            qualified = info["position_success"] and info["direction_success"]
+-            if terminated or truncated or info["collision"] or qualified:
+-                break  # Do not start at a collision or an already-qualified pose.
+-            if info["dist"] <= 0.06:
+-                base.near_start = True
+-                base.start_pos = base._ee_pos()
+-                base._update_visualization_sites()
+-                return base._finish_reset()
+-        # Preserve the original target and physical state, not an easier redraw.
+-        mj.mj_setState(base.model, base.data, saved, spec)
+-        base.q_target = q_target
+-        mj.mj_forward(base.model, base.data)
+-        return base._finish_reset()
++# class ArrivalStartWrapper(gym.Wrapper):
++#     """Training-only reset preparation; prefix actions never enter PPO batches."""
++#     prefix_limit = 512
++
++#     def __init__(self, env, model_path, probability):
++#         super().__init__(env)
++#         if not self.unwrapped.require_direction or self.unwrapped.near_start_probability != 0:
++#             raise ValueError("arrival starts require a direction environment with IK near starts disabled")
++#         if not np.isfinite(probability) or not 0.0 <= probability <= 1.0:
++#             raise ValueError("arrival-start probability must be in [0, 1]")
++#         self.probability = float(probability)
++#         self.teacher = Agent(env)
++#         load_agent_weights(model_path, self.teacher, "cpu")
++#         self.teacher.eval().requires_grad_(False)
++
++#     def reset(self, *, seed=None, options=None):
++#         obs, info = self.env.reset(seed=seed, options=options)
++#         base = self.unwrapped
++#         if self.probability == 0.0 or base.rng.random() >= self.probability:
++#             return obs, info
++#         base.near_start_requested = True
++#         spec = mj.mjtState.mjSTATE_INTEGRATION
++#         saved = np.empty(mj.mj_stateSize(base.model, spec))
++#         mj.mj_getState(base.model, base.data, saved, spec)
++#         q_target = base.q_target.copy()
++#         for _ in range(min(self.prefix_limit, base.horizon)):
++#             with torch.no_grad():
++#                 action = torch.tanh(self.teacher.actor_mean(
++#                     torch.as_tensor(obs[None], dtype=torch.float32),
++#                 ))[0].numpy()
++#             obs, _, terminated, truncated, info = self.env.step(action)
++#             base.arrival_prefix_steps += 1
++#             qualified = info["position_success"] and info["direction_success"]
++#             if terminated or truncated or info["collision"] or qualified:
++#                 break  # Do not start at a collision or an already-qualified pose.
++#             if info["dist"] <= 0.06:
++#                 base.near_start = True
++#                 base.start_pos = base._ee_pos()
++#                 base._update_visualization_sites()
++#                 return base._finish_reset()
++#         # Preserve the original target and physical state, not an easier redraw.
++#         mj.mj_setState(base.model, base.data, saved, spec)
++#         base.q_target = q_target
++#         mj.mj_forward(base.model, base.data)
++#         return base._finish_reset()
+ 
+ 
+ def _capture_numpy_random_state():
+@@ -594,38 +595,39 @@ def should_update_best(
+         return False
+     if best_metrics is None:
+         return True
+-    if "pose_reached_rate" in metrics:
+-        def direction_rank(item):
+-            return (
+-                item["success_rate"],
+-                item.get("pose_reached_rate", 0.0),
+-                -item.get("mean_min_direction_angle_at_position_deg", 180.0),
+-                -item["collision_rate"],
+-                item.get("position_success_rate", 0.0),
+-                -item["mean_final_distance"],
+-            )
+-        return direction_rank(metrics) > direction_rank(best_metrics)
++    # if "pose_reached_rate" in metrics:
++    #     def direction_rank(item):
++    #         return (
++    #             item["success_rate"],
++    #             item.get("pose_reached_rate", 0.0),
++    #             -item.get("mean_min_direction_angle_at_position_deg", 180.0),
++    #             -item["collision_rate"],
++    #             item.get("position_success_rate", 0.0),
++    #             -item["mean_final_distance"],
++    #         )
++    #     return direction_rank(metrics) > direction_rank(best_metrics)
+     candidate_rank = (
+         metrics["success_rate"],
+         -metrics["collision_rate"],
+         -metrics["mean_final_distance"],
+-        -metrics.get("mean_final_direction_angle_deg", 0.0),
++        # -metrics.get("mean_final_direction_angle_deg", 0.0),
+     )
+     best_rank = (
+         best_metrics["success_rate"],
+         -best_metrics["collision_rate"],
+         -best_metrics["mean_final_distance"],
+-        -best_metrics.get("mean_final_direction_angle_deg", 0.0),
++        # -best_metrics.get("mean_final_direction_angle_deg", 0.0),
+     )
+     return candidate_rank > best_rank
+ 
+ 
+ @torch.no_grad()
+-def evaluate_policy(agent, args, device, *, near_start=False):
++# def evaluate_policy(agent, args, device, *, near_start=False):
++def evaluate_policy(agent, args, device):
+     """Same fixed goals; force full or near starts independently of training."""
+     kwargs = environment_kwargs(args.env_id, args, render_mode=None)
+-    if args.env_id == "RM75Direction-v0":
+-        kwargs["near_start_probability"] = 1.0 if near_start else 0.0
++    # if args.env_id == "RM75Direction-v0":
++    #     kwargs["near_start_probability"] = 1.0 if near_start else 0.0
+     eval_env = gym.make(
+         args.env_id,
+         **kwargs,
+@@ -633,13 +635,13 @@ def evaluate_policy(agent, args, device, *, near_start=False):
+     successes = []
+     collisions = []
+     final_distances = []
+-    final_direction_angles = []
++    # final_direction_angles = []
+     position_successes = []
+-    angle_successes = []
+-    pose_reached = []
+-    min_angles_at_position = []
++    # angle_successes = []
++    # pose_reached = []
++    # min_angles_at_position = []
+     episode_lengths = []
+-    valid_starts = []
++    # valid_starts = []
+     was_training = agent.training
+     agent.eval()
+     try:
+@@ -648,15 +650,15 @@ def evaluate_policy(agent, args, device, *, near_start=False):
+             observation, reset_info = eval_env.reset(
+                 seed=args.eval_seed + episode
+             )
+-            valid_start = not near_start or bool(reset_info.get("near_start", False))
+-            valid_starts.append(float(valid_start))
++            # valid_start = not near_start or bool(reset_info.get("near_start", False))
++            # valid_starts.append(float(valid_start))
+             info = reset_info
+             step = 0
+             for step in range(1, horizon + 1):
+-                if not valid_start:
+-                    # A failed near reset is a failed sample, not full-task success.
+-                    step = 0
+-                    break
++                # if not valid_start:
++                #     # A failed near reset is a failed sample, not full-task success.
++                #     step = 0
++                #     break
+                 observation_tensor = torch.as_tensor(
+                     observation[None, :],
+                     dtype=torch.float32,
+@@ -673,21 +675,21 @@ def evaluate_policy(agent, args, device, *, near_start=False):
+             successes.append(float(bool(info.get("success", False))))
+             collisions.append(float(bool(info.get("collision", False))))
+             final_distances.append(float(info.get("dist", np.nan)))
+-            direction_angle = info.get("direction_angle_deg", np.nan)
+-            final_direction_angles.append(
+-                np.nan if direction_angle is None else float(direction_angle)
+-            )
++            # direction_angle = info.get("direction_angle_deg", np.nan)
++            # final_direction_angles.append(
++            #     np.nan if direction_angle is None else float(direction_angle)
++            # )
+             position_successes.append(float(bool(
+                 info.get(
+                     "position_reached",
+                     info.get("position_success", info.get("success", False)),
+                 )
+             )))
+-            angle_successes.append(float(bool(info.get("angle_reached", False))))
+-            pose_reached.append(float(bool(info.get("pose_reached", False))))
+-            min_angles_at_position.append(float(
+-                info.get("min_direction_angle_at_position_deg", 180.0)
+-            ))
++            # angle_successes.append(float(bool(info.get("angle_reached", False))))
++            # pose_reached.append(float(bool(info.get("pose_reached", False))))
++            # min_angles_at_position.append(float(
++            #     info.get("min_direction_angle_at_position_deg", 180.0)
++            # ))
+             episode_lengths.append(float(step))
+     finally:
+         eval_env.close()
+@@ -697,24 +699,24 @@ def evaluate_policy(agent, args, device, *, near_start=False):
+         "success_rate": float(np.mean(successes)),
+         "collision_rate": float(np.mean(collisions)),
+         "mean_final_distance": float(np.mean(final_distances)),
+-        "mean_final_direction_angle_deg": float(
+-            np.nanmean(final_direction_angles)
+-            if not np.all(np.isnan(final_direction_angles))
+-            else 0.0
+-        ),
++        # "mean_final_direction_angle_deg": float(
++        #     np.nanmean(final_direction_angles)
++        #     if not np.all(np.isnan(final_direction_angles))
++        #     else 0.0
++        # ),
+         "position_success_rate": float(np.mean(position_successes)),
+         "mean_episode_length": float(np.mean(episode_lengths)),
+     }
+-    if args.env_id == "RM75Direction-v0":
+-        metrics.update({
+-            "angle_success_rate": float(np.mean(angle_successes)),
+-            "pose_reached_rate": float(np.mean(pose_reached)),
+-            "mean_min_direction_angle_at_position_deg": float(
+-                np.mean(min_angles_at_position)
+-            ),
+-        })
+-    if near_start:
+-        metrics["valid_start_rate"] = float(np.mean(valid_starts))
++    # if args.env_id == "RM75Direction-v0":
++    #     metrics.update({
++    #         "angle_success_rate": float(np.mean(angle_successes)),
++    #         "pose_reached_rate": float(np.mean(pose_reached)),
++    #         "mean_min_direction_angle_at_position_deg": float(
++    #             np.mean(min_angles_at_position)
++    #         ),
++    #     })
++    # if near_start:
++    #     metrics["valid_start_rate"] = float(np.mean(valid_starts))
+     return metrics
+ 
+ 
+@@ -759,18 +761,18 @@ def evaluate_and_maybe_save_best(
+         f"success={metrics['success_rate']:.3f}, "
+         f"collision={metrics['collision_rate']:.3f}, "
+         f"final_dist={metrics['mean_final_distance']:.4f}, "
+-        f"direction_deg={metrics['mean_final_direction_angle_deg']:.2f}, "
++        # f"direction_deg={metrics['mean_final_direction_angle_deg']:.2f}, "
+         f"steps={metrics['mean_episode_length']:.1f}, "
+         f"acceptance={metrics['meets_acceptance']}"
+     )
+-    if args.env_id == "RM75Direction-v0" and args.near_start_probability > 0.0:
+-        near_metrics = evaluate_policy(agent, args, device, near_start=True)
+-        log_scalars(writer, near_metrics, global_step, prefix="eval_near")
+-        print(
+-            f"Near-start evaluation: success={near_metrics['success_rate']:.3f}, "
+-            f"pose_reached={near_metrics['pose_reached_rate']:.3f}, "
+-            f"valid_start={near_metrics['valid_start_rate']:.3f}"
+-        )
++    # if args.env_id == "RM75Direction-v0" and args.near_start_probability > 0.0:
++    #     near_metrics = evaluate_policy(agent, args, device, near_start=True)
++    #     log_scalars(writer, near_metrics, global_step, prefix="eval_near")
++    #     print(
++    #         f"Near-start evaluation: success={near_metrics['success_rate']:.3f}, "
++    #         f"pose_reached={near_metrics['pose_reached_rate']:.3f}, "
++    #         f"valid_start={near_metrics['valid_start_rate']:.3f}"
++    #     )
+     if not should_update_best(
+         metrics,
+         best_metrics,
+@@ -815,10 +817,10 @@ RESUME_CONFIG_FIELDS = (
+     "target_kl",
+     "target_mode",
+     "target_pos",
+-    "target_sampling",
+     "collision_penalty",
+-    "near_start_probability",
+-    "near_start_from",
++    "dist_success_thresh",
++    # "near_start_probability",
++    # "near_start_from",
+     "eval_interval",
+     "eval_episodes",
+     "eval_seed",
+@@ -846,10 +848,10 @@ if __name__ == "__main__":
+         raise ValueError("checkpoint_interval must be non-negative")
+     if args.collision_penalty < 0.0:
+         raise ValueError("collision_penalty must be non-negative")
+-    if not 0.0 <= args.near_start_probability <= 1.0:
+-        raise ValueError("near_start_probability must be within [0, 1]")
+-    if args.near_start_probability > 0.0 and args.env_id != "RM75Direction-v0":
+-        raise ValueError("near starts require RM75Direction-v0")
++    # if not 0.0 <= args.near_start_probability <= 1.0:
++    #     raise ValueError("near_start_probability must be within [0, 1]")
++    # if args.near_start_probability > 0.0 and args.env_id != "RM75Direction-v0":
++    #     raise ValueError("near starts require RM75Direction-v0")
+     if args.eval_interval < 0:
+         raise ValueError("eval_interval must be non-negative")
+     if args.eval_episodes <= 0:
+@@ -873,12 +875,12 @@ if __name__ == "__main__":
+             )
+         apply_resume_configuration(args, resume_preview)
+ 
+-    if args.near_start_from is not None:
+-        if args.env_id != "RM75Direction-v0" or args.near_start_probability <= 0:
+-            raise ValueError("--near-start-from requires RM75Direction-v0 and a positive near-start probability")
+-        if args.target_mode == "none":
+-            raise ValueError("arrival starts require a target")
+-        args.near_start_from = str(resolve_training_path(args.near_start_from))
++    # if args.near_start_from is not None:
++    #     if args.env_id != "RM75Direction-v0" or args.near_start_probability <= 0:
++    #         raise ValueError("--near-start-from requires RM75Direction-v0 and a positive near-start probability")
++    #     if args.target_mode == "none":
++    #         raise ValueError("arrival starts require a target")
++    #     args.near_start_from = str(resolve_training_path(args.near_start_from))
+ 
+     args.batch_size = int(args.num_envs * args.num_steps)
+     args.minibatch_size = int(args.batch_size // args.num_minibatches)
+@@ -953,7 +955,8 @@ if __name__ == "__main__":
+ 
+     # env setup
+     envs = gym.vector.SyncVectorEnv(
+-        [make_env(args.env_id, args=args) for _ in range(args.num_envs)]
++    [make_env(args.env_id, args=args) for _ in range(args.num_envs)],
++    autoreset_mode=gym.vector.AutoresetMode.DISABLED,
+     )
+     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+ 
+@@ -1017,13 +1020,11 @@ if __name__ == "__main__":
+     recent_successes = deque(maxlen=100)
+     recent_collisions = deque(maxlen=100)
+     recent_position_successes = deque(maxlen=100)
+-    recent_angle_successes = deque(maxlen=100)
+-    recent_pose_reached = deque(maxlen=100)
+-    recent_near_starts = deque(maxlen=100)
++    # recent_angle_successes = deque(maxlen=100)
++    # recent_pose_reached = deque(maxlen=100)
++    # recent_near_starts = deque(maxlen=100)
+     recent_region_successes = {
+         "uniform": deque(maxlen=100),
+-        "hard_negative_y": deque(maxlen=100),
+-        "hard_far_x": deque(maxlen=100),
+         "fixed": deque(maxlen=100),
+     }
+ 
+@@ -1074,6 +1075,22 @@ if __name__ == "__main__":
+     signal.signal(signal.SIGINT, request_graceful_stop)
+     interrupted = False
+ 
++        # 微调前评估初始化模型，将其作为本轮选模基线。
++    if args.init_from is not None and args.eval_interval > 0:
++        print("Evaluating initialization before PPO updates...")
++
++        best_eval_metrics, _ = evaluate_and_maybe_save_best(
++            agent,
++            args,
++            device,
++            writer,
++            global_step=global_step,
++            best_metrics=None,
++            best_model_path=best_model_path,
++            best_metrics_path=best_metrics_path,
++        )
++        last_eval_step = global_step
++
+     for iteration in range(start_iteration, args.num_iterations + 1):
+         scheduled_action_std = compute_action_std(
+             initial_action_std=args.initial_action_std,
+@@ -1104,7 +1121,12 @@ if __name__ == "__main__":
+ 
+             # TRY NOT TO MODIFY: execute the game and log data.
+             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+-            next_done = np.logical_or(terminations, truncations)
++            finished_envs= np.logical_or(terminations, truncations)
++            if np.any(finished_envs):
++                next_obs, _ = envs.reset(
++                    options={"reset_mask": finished_envs}
++                )
++            next_done = finished_envs
+             rewards[step] = torch.as_tensor(reward, dtype=torch.float32, device=device).view(-1)
+             next_obs = torch.as_tensor(next_obs, dtype=torch.float32, device=device)
+             next_done = torch.as_tensor(next_done.astype(np.float32), dtype=torch.float32, device=device)
+@@ -1163,21 +1185,21 @@ if __name__ == "__main__":
+                             ),
+                         )[env_idx]
+                     )
+-                    angle_success = float(
+-                        infos.get("angle_reached", np.zeros(args.num_envs))[env_idx]
+-                    )
+-                    pose_reached = float(
+-                        infos.get("pose_reached", np.zeros(args.num_envs))[env_idx]
+-                    )
+-                    direction_angle_deg = infos.get(
+-                        "direction_angle_deg",
+-                        np.full(args.num_envs, np.nan),
+-                    )[env_idx]
+-                    direction_angle_deg = (
+-                        np.nan
+-                        if direction_angle_deg is None
+-                        else float(direction_angle_deg)
+-                    )
++                    # angle_success = float(
++                    #     infos.get("angle_reached", np.zeros(args.num_envs))[env_idx]
++                    # )
++                    # pose_reached = float(
++                    #     infos.get("pose_reached", np.zeros(args.num_envs))[env_idx]
++                    # )
++                    # direction_angle_deg = infos.get(
++                    #     "direction_angle_deg",
++                    #     np.full(args.num_envs, np.nan),
++                    # )[env_idx]
++                    # direction_angle_deg = (
++                    #     np.nan
++                    #     if direction_angle_deg is None
++                    #     else float(direction_angle_deg)
++                    # )
+                     target_region = str(
+                         infos.get(
+                             "target_region",
+@@ -1193,11 +1215,11 @@ if __name__ == "__main__":
+                     recent_successes.append(success)
+                     recent_collisions.append(collision)
+                     recent_position_successes.append(position_success)
+-                    recent_angle_successes.append(angle_success)
+-                    recent_pose_reached.append(pose_reached)
+-                    recent_near_starts.append(float(
+-                        infos.get("near_start", np.zeros(args.num_envs))[env_idx]
+-                    ))
++                    # recent_angle_successes.append(angle_success)
++                    # recent_pose_reached.append(pose_reached)
++                    # recent_near_starts.append(float(
++                    #     infos.get("near_start", np.zeros(args.num_envs))[env_idx]
++                    # ))
+                     if target_region in recent_region_successes:
+                         recent_region_successes[target_region].append(
+                             success
+@@ -1213,7 +1235,7 @@ if __name__ == "__main__":
+                             f"timeout={bool(timeout)}, "
+                             f"target_region={target_region}, "
+                             f"final_dist={final_dist:.4f}, "
+-                            f"direction_deg={direction_angle_deg:.2f}"
++                            # f"direction_deg={direction_angle_deg:.2f}"
+                         )
+ 
+                     episode_metrics = {
+@@ -1225,15 +1247,15 @@ if __name__ == "__main__":
+                         "final_distance": final_dist,
+                         "position_success": position_success,
+                     }
+-                    if np.isfinite(direction_angle_deg):
+-                        episode_metrics["final_direction_angle_deg"] = direction_angle_deg
+-                    if args.env_id == "RM75Direction-v0":
+-                        episode_metrics.update({
+-                            "arrival_prefix_steps": infos.get("arrival_prefix_steps", np.zeros(args.num_envs))[env_idx],
+-                            "angle_success": angle_success,
+-                            "pose_reached": pose_reached,
+-                            "min_direction_angle_at_position_deg": infos["min_direction_angle_at_position_deg"][env_idx],
+-                        })
++                    # if np.isfinite(direction_angle_deg):
++                    #     episode_metrics["final_direction_angle_deg"] = direction_angle_deg
++                    # if args.env_id == "RM75Direction-v0":
++                    #     episode_metrics.update({
++                    #         "arrival_prefix_steps": infos.get("arrival_prefix_steps", np.zeros(args.num_envs))[env_idx],
++                    #         "angle_success": angle_success,
++                    #         "pose_reached": pose_reached,
++                    #         "min_direction_angle_at_position_deg": infos["min_direction_angle_at_position_deg"][env_idx],
++                    #     })
+                     log_scalars(writer, episode_metrics, global_step)
+ 
+         # bootstrap value if not done
+@@ -1351,12 +1373,12 @@ if __name__ == "__main__":
+                 "collision_rate": collision_rate,
+                 "position_success_rate": np.mean(recent_position_successes),
+             }
+-            if args.env_id == "RM75Direction-v0":
+-                recent_metrics.update({
+-                    "near_start_rate": np.mean(recent_near_starts),
+-                    "angle_success_rate": np.mean(recent_angle_successes),
+-                    "pose_reached_rate": np.mean(recent_pose_reached),
+-                })
++            # if args.env_id == "RM75Direction-v0":
++            #     recent_metrics.update({
++            #         "near_start_rate": np.mean(recent_near_starts),
++            #         "angle_success_rate": np.mean(recent_angle_successes),
++            #         "pose_reached_rate": np.mean(recent_pose_reached),
++            #     })
+             log_scalars(writer, recent_metrics, global_step)
+ 
+         for region, outcomes in recent_region_successes.items():
+diff --git a/Scripts/train_rm75_direction.sh b/Scripts/train_rm75_direction.sh
+index a4abc67..01481a5 100755
+--- a/Scripts/train_rm75_direction.sh
++++ b/Scripts/train_rm75_direction.sh
+@@ -1,42 +1,43 @@
+ #!/usr/bin/env bash
+-set -euo pipefail
++# 方向训练暂时停用：原命令保留为注释，本脚本不会启动训练。
++# set -euo pipefail
+ 
+-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+-cd "$PROJECT_ROOT"
++# PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++# cd "$PROJECT_ROOT"
+ 
+-BASE_MODEL="runs/RM75Direction-v0__RM75-direction-v6-finetune__1__1791869875/RM75-direction-v6-finetune.best.cleanrl_model"
+-PREFIX_MODEL="runs/RM75Direction-v0__RM75-direction-v5-near-coordination__1__1791859371/RM75-direction-v5-near-coordination.best.cleanrl_model"
+-# New run from retained best (97% selection eval, 93% unseen-seed eval).
+-# Keep V5 reset preparation and all numeric task/training settings.
+-# Full-start evaluation uses only the learning policy, never the prefix model.
+-# --init-from starts a fresh optimizer, step counter and W&B history.
+-if [[ ! -f "$BASE_MODEL" ]]; then
+-  echo "Missing validated direction initialization model: $BASE_MODEL" >&2
+-  exit 1
+-fi
+-if [[ ! -f "$PREFIX_MODEL" ]]; then
+-  echo "Missing frozen arrival-start model: $PREFIX_MODEL" >&2
+-  exit 1
+-fi
++# BASE_MODEL="runs/RM75Direction-v0__RM75-direction-v6-finetune__1__1791869875/RM75-direction-v6-finetune.best.cleanrl_model"
++# PREFIX_MODEL="runs/RM75Direction-v0__RM75-direction-v5-near-coordination__1__1791859371/RM75-direction-v5-near-coordination.best.cleanrl_model"
++# # New run from retained best (97% selection eval, 93% unseen-seed eval).
++# # Keep V5 reset preparation and all numeric task/training settings.
++# # Full-start evaluation uses only the learning policy, never the prefix model.
++# # --init-from starts a fresh optimizer, step counter and W&B history.
++# if [[ ! -f "$BASE_MODEL" ]]; then
++#   echo "Missing validated direction initialization model: $BASE_MODEL" >&2
++#   exit 1
++# fi
++# if [[ ! -f "$PREFIX_MODEL" ]]; then
++#   echo "Missing frozen arrival-start model: $PREFIX_MODEL" >&2
++#   exit 1
++# fi
+ 
+-.venv/bin/python Algorithms/ppo_continuous_action.py \
+-  --env-id RM75Direction-v0 \
+-  --exp-name RM75-direction-v6-clean-finetune \
+-  --init-from "$BASE_MODEL" \
+-  --near-start-from "$PREFIX_MODEL" \
+-  --total-timesteps 500000 \
+-  --num-envs 1 \
+-  --learning-rate 1e-5 \
+-  --target-sampling uniform \
+-  --collision-penalty 45 \
+-  --near-start-probability 0.5 \
+-  --initial-action-std 0.15 \
+-  --final-action-std 0.06 \
+-  --action-std-hold-fraction 0.20 \
+-  --eval-interval 100000 \
+-  --eval-episodes 100 \
+-  --eval-seed 20000 \
+-  --eval-max-collision-rate 0.10 \
+-  --eval-target-success 0.75 \
+-  --checkpoint-interval 100000 \
+-  --track
++# .venv/bin/python Algorithms/ppo_continuous_action.py \
++#   --env-id RM75Direction-v0 \
++#   --exp-name RM75-direction-v6-clean-finetune \
++#   --init-from "$BASE_MODEL" \
++#   --near-start-from "$PREFIX_MODEL" \
++#   --total-timesteps 500000 \
++#   --num-envs 1 \
++#   --learning-rate 1e-5 \
++#   --target-sampling uniform \
++#   --collision-penalty 45 \
++#   --near-start-probability 0.5 \
++#   --initial-action-std 0.15 \
++#   --final-action-std 0.06 \
++#   --action-std-hold-fraction 0.20 \
++#   --eval-interval 100000 \
++#   --eval-episodes 100 \
++#   --eval-seed 20000 \
++#   --eval-max-collision-rate 0.10 \
++#   --eval-target-success 0.75 \
++#   --checkpoint-interval 100000 \
++#   --track
+diff --git a/Scripts/train_rm75_v4.sh b/Scripts/train_rm75_v4.sh
+index de4a54a..44d820e 100755
+--- a/Scripts/train_rm75_v4.sh
++++ b/Scripts/train_rm75_v4.sh
+@@ -8,19 +8,20 @@ export RM75_DEBUG=0
+ 
+ .venv/bin/python Algorithms/ppo_continuous_action.py \
+   --env-id RM75-v0 \
+-  --exp-name RM75-v4-high-success \
+-  --total-timesteps 2500000 \
++  --exp-name RM75-point-3cm-v1\
++  --total-timesteps 200000 \
+   --num-envs 1 \
+-  --learning-rate 1e-4 \
+-  --target-sampling uniform \
++  --learning-rate 5e-6 \
+   --collision-penalty 45 \
+   --initial-action-std 0.30 \
+   --final-action-std 0.10 \
+   --action-std-hold-fraction 0.20 \
+-  --eval-interval 200000 \
++  --eval-interval 20000 \
+   --eval-episodes 100 \
+   --eval-seed 20000 \
+   --eval-max-collision-rate 0.10 \
+-  --eval-target-success 0.82 \
++  --eval-target-success 0.90 \
++  --dist-success-thresh 0.03 \
+   --checkpoint-interval 100000 \
++  --init-from "runs/RM75-v0__RM75-point-v1__1__1792130155/RM75-point-v1.best.cleanrl_model" \
+   --track
+diff --git a/Scripts/visualize_agent.py b/Scripts/visualize_agent.py
+index 259e82a..32c23c8 100755
+--- a/Scripts/visualize_agent.py
++++ b/Scripts/visualize_agent.py
+@@ -38,8 +38,8 @@ from env_rm75 import RM75P2PEnv
+ 
+ SUPPORTED_MODEL_ENVS = {
+     (19, 6): "UR5-v0",
+-    (28, 7): "RM75-v0",
+-    (31, 7): "RM75Direction-v0",
++    (21, 7): "RM75-v0",
++    # (31, 7): "RM75Direction-v0",
+ }
+ 
+ def latest_model_path() -> Path:
+@@ -115,8 +115,8 @@ def infer_environment_id(state: dict[str, torch.Tensor]) -> str:
+         raise ValueError(
+             "Unsupported model dimensions: "
+             f"{dimensions[0]} observations and {dimensions[1]} actions. "
+-            "Supported models are UR5-v0 (19/6), RM75-v0 (28/7), "
+-            "and RM75Direction-v0 (31/7)."
++            "Supported models are UR5-v0 (19/6) and RM75-v0 (21/7). "
++            "The direction task is temporarily disabled."
+         ) from exc
+ 
+ 
+@@ -133,12 +133,17 @@ def create_environment(env_id: str, args, render_mode):
+         ),
+     }
+     if env_id == "UR5-v0":
+-        return UR5P2PEnv(**kwargs)
+-    if env_id in {"RM75-v0", "RM75Direction-v0"}:
++        return UR5P2PEnv(
++            **kwargs)
++        # if env_id in {"RM75-v0", "RM75Direction-v0"}:
++    #     return RM75P2PEnv(
++    #         **kwargs,
++    #         require_direction=(env_id == "RM75Direction-v0"),
++    #     )
++    if env_id == "RM75-v0":
+         return RM75P2PEnv(
+             **kwargs,
+-            require_direction=(env_id == "RM75Direction-v0"),
+-        )
++            dist_success_thresh=args.dist_success_thresh)
+     raise ValueError(f"Unsupported environment: {env_id}")
+ 
+ 
+@@ -190,7 +195,8 @@ def parse_args() -> argparse.Namespace:
+     )
+     parser.add_argument(
+         "--env-id",
+-        choices=("auto", "UR5-v0", "RM75-v0", "RM75Direction-v0"),
++        # choices=("auto", "UR5-v0", "RM75-v0", "RM75Direction-v0"),
++        choices=("auto", "UR5-v0", "RM75-v0"),
+         default="auto",
+         help=(
+             "Evaluation environment. The default infers it from the saved "
+@@ -232,6 +238,12 @@ def parse_args() -> argparse.Namespace:
+         metavar=("X", "Y", "Z"),
+         help="Fixed target position; requires --target-mode fixed.",
+     )
++    parser.add_argument(
++        "--dist-success-thresh",
++        type=float,
++        default=0.05,
++        help="Success distance threshold for RM75 point-reaching.",
++    )
+     parser.add_argument(
+         "--headless",
+         action="store_true",
+@@ -257,8 +269,24 @@ def parse_args() -> argparse.Namespace:
+         default=True,
+         help="Pace rendered episodes at simulated real time.",
+     )
++
++    parser.add_argument(
++        "--near-action-factor",
++        type=float,
++        default=1.0,
++        help="Action multiplier within 0.10 m; default 1.0 means unchanged.",
++    )
+     args = parser.parse_args()
+ 
++    if (
++        not np.isfinite(args.near_action_factor)
++        or not 0.0 < args.near_action_factor <= 1.0
++    ):
++        parser.error("--near-action-factor must be in (0, 1]")
++    
++    args = parser.parse_args()
++    if not np.isfinite(args.dist_success_thresh) or args.dist_success_thresh <= 0.0:
++        parser.error("--dist-success-thresh must be finite and positive")
+     if args.episodes <= 0:
+         parser.error("--episodes must be greater than zero")
+     if args.progress_every < 0:
+@@ -296,6 +324,8 @@ def main() -> None:
+         for episode in range(args.episodes):
+             observation, _ = env.reset(seed=args.seed + episode)
+             initial_distance = float(env.prev_dist)
++            min_distance = initial_distance
++            previous_tcp = env.data.site_xpos[env.ee_sid].copy()
+             total_reward = 0.0
+             info: dict = {}
+ 
+@@ -313,21 +343,61 @@ def main() -> None:
+                     observation,
+                     stochastic=args.stochastic,
+                 )
++                previous_q = env.data.qpos[:env.nq].copy()
++                previous_q_ref = env.q_target[:env.nq].copy()
++                distance_before = float(env.prev_dist)
++
++                # 默认不改变动作；仅用于近处动作减半的对照实验。
++                if distance_before < 0.10:
++                    action = action * args.near_action_factor
++
+                 observation, reward, terminated, truncated, info = (
+                     env.step(action)
+                 )
++
++                min_distance = min(min_distance, float(info["dist"]))
++                reference_delta = (
++                    env.q_target[:env.nq] - previous_q_ref
++                )
++                joint_delta = (
++                    env.data.qpos[:env.nq] - previous_q
++                )
++                current_tcp = env.data.site_xpos[env.ee_sid].copy()
++                tcp_speed = float(
++                    np.linalg.norm(current_tcp - previous_tcp)
++                    / simulation_step_seconds
++                )
++                previous_tcp = current_tcp
+                 total_reward += float(reward)
+ 
+                 if (
+-                    not args.headless
+-                    and args.progress_every
++                    args.progress_every
+                     and step % args.progress_every == 0
+                 ):
++                    q = env.data.qpos[:env.nq]
++                    q_ref = env.q_target[:env.nq]
++                    tracking_error = float(np.max(np.abs(q_ref - q)))
++                    lag_joint = int(np.argmax(np.abs(q_ref - q)))
++
++                    joint_ranges = env.model.jnt_range[:env.nq]
++                    limited = env.model.jnt_limited[:env.nq].astype(bool)
++                    near_limit = np.flatnonzero(
++                        limited & (
++                            (np.abs(q_ref - joint_ranges[:, 0]) < 0.01)
++                            | (np.abs(q_ref - joint_ranges[:, 1]) < 0.01)
++                        )
++                    ) + 1
++
+                     print(
+                         f"  step={step}, dist={float(info['dist']):.4f}, "
+-                        f"direction_deg="
+-                        f"{float(info.get('direction_angle_deg') or 0.0):.2f}, "
+-                        f"reward={float(reward):.3f}"
++                        f"reward={float(reward):.3f}, "
++                        f"tcp_speed={tcp_speed:.4f}m/s, "
++                        f"track_err={tracking_error:.4f}rad, "
++                        f"dqref_max={np.max(np.abs(reference_delta)):.4f}rad, "
++                        f"lag_joint={lag_joint + 1}, "
++                        f"dqref_j={reference_delta[lag_joint]:+.4f}rad, "
++                        f"dq_j={joint_delta[lag_joint]:+.4f}rad, "
++                        f"qref_limits={near_limit.tolist()}"
+                     )
+ 
+                 if not args.headless and args.realtime:
+@@ -348,12 +418,12 @@ def main() -> None:
+                 else "timeout"
+             )
+             final_distance = float(info.get("dist", np.nan))
+-            final_direction_angle = info.get("direction_angle_deg", np.nan)
+-            final_direction_angle = (
+-                np.nan
+-                if final_direction_angle is None
+-                else float(final_direction_angle)
+-            )
++            # final_direction_angle = info.get("direction_angle_deg", np.nan)
++            # final_direction_angle = (
++            #     np.nan
++            #     if final_direction_angle is None
++            #     else float(final_direction_angle)
++            # )
+             results.append(
+                 {
+                     "success": success,
+@@ -363,25 +433,30 @@ def main() -> None:
+                     "steps": step,
+                     "initial_distance": initial_distance,
+                     "final_distance": final_distance,
+-                    "final_direction_angle_deg": final_direction_angle,
++                    "min_distance": min_distance,
++                    # "final_direction_angle_deg": final_direction_angle,
+                     "position_success": bool(
+                         info.get(
+                             "position_reached",
+                             info.get("position_success", success),
+                         )
+                     ),
+-                    "angle_success": bool(info.get("angle_reached", False)),
+-                    "pose_reached": bool(info.get("pose_reached", False)),
+-                    "min_direction_angle_at_position_deg": float(
+-                        info.get("min_direction_angle_at_position_deg", 180.0)
+-                    ),
++                    # "angle_success": bool(info.get("angle_reached", False)),
++                    # "pose_reached": bool(info.get("pose_reached", False)),
++                    # "min_direction_angle_at_position_deg": float(
++                    #     info.get("min_direction_angle_at_position_deg", 180.0)
++                    # ),
+                     "return": total_reward,
+                 }
+             )
+             print(
+                 f"Episode {episode + 1:03d}: {reason:9s} | "
++                f"seed={args.seed + episode} | "
++                f"goal={np.round(env.goal_pos, 4)} | "
+                 f"steps={step:4d} | final_dist={final_distance:.4f} | "
+-                f"direction={final_direction_angle:6.2f} deg | "
++                f"min_dist={min_distance:.4f} | "
++                f"entered_5cm={min_distance < 0.05} | "
++                # f"direction={final_direction_angle:6.2f} deg | "
+                 f"return={total_reward:.2f}"
+             )
+     finally:
+@@ -401,47 +476,56 @@ def main() -> None:
+     position_success_rate = np.mean(
+         [item["position_success"] for item in results]
+     )
+-    angle_success_rate = np.mean(
+-        [item["angle_success"] for item in results]
+-    )
+-    pose_reached_rate = np.mean([item["pose_reached"] for item in results])
+-    mean_min_angle_at_position = np.mean([
+-        item["min_direction_angle_at_position_deg"] for item in results
+-    ])
+-    direction_angles = np.asarray(
+-        [item["final_direction_angle_deg"] for item in results],
+-        dtype=np.float64,
+-    )
+-    mean_direction_angle = (
+-        float(np.nanmean(direction_angles))
+-        if not np.all(np.isnan(direction_angles))
+-        else np.nan
+-    )
++    # angle_success_rate = np.mean(
++    #     [item["angle_success"] for item in results]
++    # )
++    # pose_reached_rate = np.mean([item["pose_reached"] for item in results])
++    # mean_min_angle_at_position = np.mean([
++    #     item["min_direction_angle_at_position_deg"] for item in results
++    # ])
++    # direction_angles = np.asarray(
++    #     [item["final_direction_angle_deg"] for item in results],
++    #     dtype=np.float64,
++    # )
++    # mean_direction_angle = (
++    #     float(np.nanmean(direction_angles))
++    #     if not np.all(np.isnan(direction_angles))
++    #     else np.nan
++    # )
+ 
+     print("\nEvaluation summary")
+     print(f"  episodes:             {len(results)}")
+     print(f"  success_rate:         {success_rate:.3f}")
+-    if env_id == "RM75Direction-v0":
+-        print(f"  position_success_rate:{position_success_rate:9.3f}")
+-        print(f"  angle_success_rate:   {angle_success_rate:.3f}")
+-        print(f"  pose_reached_rate:    {pose_reached_rate:.3f}")
+-        print(f"  mean_min_angle_at_position_deg: {mean_min_angle_at_position:.2f}")
+-        print("  (180 deg represents an episode that never reached position.)")
++    # if env_id == "RM75Direction-v0":
++    #     print(f"  position_success_rate:{position_success_rate:9.3f}")
++    #     print(f"  angle_success_rate:   {angle_success_rate:.3f}")
++    #     print(f"  pose_reached_rate:    {pose_reached_rate:.3f}")
++    #     print(f"  mean_min_angle_at_position_deg: {mean_min_angle_at_position:.2f}")
++    #     print("  (180 deg represents an episode that never reached position.)")
+     print(f"  collision_rate:       {collision_rate:.3f}")
+     print(f"  timeout_rate:         {timeout_rate:.3f}")
+     print(f"  mean_steps:           {mean_steps:.1f}")
+     print(f"  mean_initial_distance:{mean_initial_distance:9.4f}")
+     print(f"  mean_final_distance:  {mean_final_distance:.4f}")
+-    if env_id == "RM75Direction-v0":
+-        print(f"  mean_direction_deg:   {mean_direction_angle:.2f}")
++    # if env_id == "RM75Direction-v0":
++    #     print(f"  mean_direction_deg:   {mean_direction_angle:.2f}")
+     print(f"  mean_return:          {mean_return:.2f}")
+-    if env_id == "RM75Direction-v0":
+-        print(
+-            "\nTask scope: target position plus a fixed tool-axis approach "
+-            "direction, with rotation around that axis left free."
+-        )
+-    else:
+-        print("\nTask scope: end-effector point reaching only.")
++    entered_5cm_rate = np.mean([
++        item["min_distance"] < 0.05 for item in results
++    ])
++    mean_min_distance = np.mean([
++        item["min_distance"] for item in results
++    ])
++    print(f"  entered_5cm_rate:     {entered_5cm_rate:.3f}")
++    print(f"  mean_min_distance:    {mean_min_distance:.4f}")
++    # if env_id == "RM75Direction-v0":
++    #     print(
++    #         "\nTask scope: target position plus a fixed tool-axis approach "
++    #         "direction, with rotation around that axis left free."
++    #     )
++    # else:
++    #     print("\nTask scope: end-effector point reaching only.")
++    print("\nTask scope: end-effector point reaching only.")
+     print("Object grasping and gripper closure are not simulated.")
+ 
+ 
+diff --git a/__init__.py b/__init__.py
+index 861ba85..7f03957 100644
+--- a/__init__.py
++++ b/__init__.py
+@@ -19,14 +19,14 @@ if "RM75-v0" not in gym.registry:
+         max_episode_steps=None,
+     )
+ 
+-if "RM75Direction-v0" not in gym.registry:
+-    gym.register(
+-        id="RM75Direction-v0",
+-        entry_point=RM75P2PEnv,
+-        kwargs={
+-            "render_mode": None,
+-            "target_mode": "random",
+-            "require_direction": True,
+-        },
+-        max_episode_steps=None,
+-    )
++# if "RM75Direction-v0" not in gym.registry:
++#     gym.register(
++#         id="RM75Direction-v0",
++#         entry_point=RM75P2PEnv,
++#         kwargs={
++#             "render_mode": None,
++#             "target_mode": "random",
++#             "require_direction": True,
++#         },
++#         max_episode_steps=None,
++#     )
+diff --git a/env_rm75.py b/env_rm75.py
+index a373e6b..40d57d5 100644
+--- a/env_rm75.py
++++ b/env_rm75.py
+@@ -1,5 +1,5 @@
+ import os
+-import math
++# import math  # 停用方向任务使用；当前不导入。
+ import copy
+ import time
+ import sys
+@@ -23,43 +23,47 @@ RM75_SCENE_XML = (
+ class RM75P2PEnv(gym.Env):
+     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 50}
+ 
++    # ==================== 1. Gymnasium 对外接口 ====================
++
+     def __init__(
+         self,
+         render_mode=None,
+         seed=0,
+         target_mode: str = "random",
+         target_pos: list | tuple | np.ndarray = None,
+-        target_sampling: str = "uniform",
+         collision_penalty: float = 75.0,
+-        require_direction: bool = False,
+-        near_start_probability: float = 0.0,
++        dist_success_thresh: float = 0.05,
++        # require_direction: bool = False,
++        # near_start_probability: float = 0.0,
+     ):
+         super().__init__()
+         if collision_penalty < 0.0:
+             raise ValueError(
+                 "collision_penalty must be non-negative"
+             )
++        if not np.isfinite(dist_success_thresh) or dist_success_thresh <= 0.0:
++            raise ValueError("dist_success_thresh must be finite and positive")
+         self.nq = 7
+         self.nu = 7
+         self.render_mode = render_mode
+         self.rng = np.random.default_rng(seed)
+         self.horizon = 1024
+         self.step_i = 0
+-        self.require_direction = bool(require_direction)
+-        self.near_start_probability = float(near_start_probability)
+-        if not np.isfinite(self.near_start_probability) or not (
+-            0.0 <= self.near_start_probability <= 1.0
+-        ):
+-            raise ValueError("near_start_probability must be in [0, 1]")
+-        if self.near_start_probability > 0.0 and not self.require_direction:
+-            raise ValueError("near starts require the direction task")
+-        self.near_start = False
+-        self.near_start_requested = False
+-        self.arrival_prefix_steps = 0
+-        self.goal_direction = np.array(
+-            [0.0, 0.0, -1.0],
+-            dtype=np.float64,
+-        )
++        # self.require_direction = bool(require_direction)
++        # self.near_start_probability = float(near_start_probability)
++        # if not np.isfinite(self.near_start_probability) or not (
++        #     0.0 <= self.near_start_probability <= 1.0
++        # ):
++        #     raise ValueError("near_start_probability must be in [0, 1]")
++        # if self.near_start_probability > 0.0 and not self.require_direction:
++        #     raise ValueError("near starts require the direction task")
++        # self.near_start = False
++        # self.near_start_requested = False
++        # self.arrival_prefix_steps = 0
++        # self.goal_direction = np.array(
++        #     [0.0, 0.0, -1.0],
++        #     dtype=np.float64,
++        # )
+ 
+         self.action_scale = np.full(
+             self.nu,
+@@ -73,11 +77,13 @@ class RM75P2PEnv(gym.Env):
+             dtype=np.float32,
+         )
+ 
++        # Point observation: q(7), qd(7), TCP(3), goal(3), collision(1).
++        # 历史28维说明，非当前观测：
+         # Legacy point task: q + qd + tracking error + ee + goal + collision.
+         # Direction task appends target_direction - current_tool_direction.
+-        obs_dim = 3 * self.nq + 3 + 3 + 1
+-        if self.require_direction:
+-            obs_dim += 3
++        obs_dim = 2 * self.nq + 3 + 3 + 1
++        # if self.require_direction:
++        #     obs_dim += 3
+         obs_high = np.full(obs_dim, np.inf, dtype=np.float32)
+         self.observation_space = gym.spaces.Box(-obs_high, obs_high, dtype=np.float32)
+ 
+@@ -97,49 +103,40 @@ class RM75P2PEnv(gym.Env):
+         self._once_logged = False
+ 
+         self.prev_dist = 0.0
+-        self.prev_direction_angle = None
+-        self.direction_hold_steps = 0
++        # self.prev_direction_angle = None
++        # self.direction_hold_steps = 0
+         self.position_reached = False
+-        self.direction_reached = False
+-        self.angle_reached = False
+-        self.min_direction_angle_at_position_deg = 180.0
+-        self._milestone_20cm_claimed = False
+-        self._milestone_10cm_claimed = False
+-        self._pose_milestones_claimed = set()
++        # self.direction_reached = False
++        # self.angle_reached = False
++        # self.min_direction_angle_at_position_deg = 180.0
+         self.q_target = None
+         self.use_ik_init = os.getenv("RM75_USE_IK", "1") == "1"  # Enable IK initialization by default
+         # Stop IK inside 5 mm so the validated target box has margin below the
+         # environment's 1 cm reachability acceptance threshold.
+         self.ik_tolerance = 0.005
+         # Reward configuration (centralized for easier tuning)
+-        # The temporary TCP has no tool geometry. Use local +Z, collinear with
+-        # joint_7, so rotation around the approach direction remains free.
+-        self.approach_axis = os.getenv("RM75_APPROACH_AXIS", "z")
+-        if self.approach_axis not in {"x", "y", "z", "-x", "-y", "-z"}:
+-            raise ValueError(
+-                "RM75_APPROACH_AXIS must be x, y, z, -x, -y, or -z"
+-            )
++        # # The temporary TCP has no tool geometry. Use local +Z, collinear with
++        # # joint_7, so rotation around the approach direction remains free.
++        # self.approach_axis = os.getenv("RM75_APPROACH_AXIS", "z")
++        # if self.approach_axis not in {"x", "y", "z", "-x", "-y", "-z"}:
++        #     raise ValueError(
++        #         "RM75_APPROACH_AXIS must be x, y, z, -x, -y, or -z"
++        #     )
+         self.reward_cfg = {
+-            "dist_success_thresh": 0.05,
+-            "direction_success_thresh": math.radians(15.0),
+-            "direction_hold_steps": 5,
+-            "direction_gate_distance": 0.20,
+-            "direction_gate_width": 0.15,
+-            "direction_progress_scale": 6.0,
+-            "direction_cost_weight": 0.05 if self.require_direction else 0.0,
+-            "pose_milestones": (
+-                (0.15, math.radians(45.0), 5.0),
+-                (0.10, math.radians(30.0), 10.0),
+-                (0.07, math.radians(20.0), 20.0),
+-            ),
++            "dist_success_thresh": float(dist_success_thresh),
++            # "direction_success_thresh": math.radians(15.0),
++            # "direction_hold_steps": 5,
++            # "direction_gate_distance": 0.20,
++            # "direction_gate_width": 0.15,
++            # "direction_progress_scale": 6.0,
++            # "direction_cost_weight": 0.05 if self.require_direction else 0.0,
+             "time_penalty": 0.01,
+             "timeout_penalty": 10.0,
+             "collision_penalty": float(collision_penalty),
+             "success_bonus": 100.0,
+             "progress_scale": 50,  # Increased from 5.0 for stronger progress reward
+-            "dist_weight": 0.5 if self.require_direction else 0.03,
+-            "milestone_20cm_bonus": 5.0,
+-            "milestone_10cm_bonus": 15.0,
++            # "dist_weight": 0.5 if self.require_direction else 0.03,
++            "dist_weight": 0.20, # 原点任务分支，权重未改变。
+         }
+ 
+         # Build the fixed robot/table model once. reset() only resets MjData.
+@@ -155,427 +152,322 @@ class RM75P2PEnv(gym.Env):
+                 "target_mode must be one of: random, fixed, none"
+             )
+         self.target_pos_cli = target_pos
+-        self.target_sampling = str(target_sampling).lower().strip()
+-        if self.target_sampling not in {"uniform", "hard_mixture"}:
+-            raise ValueError(
+-                "target_sampling must be one of: uniform, hard_mixture"
+-            )
+         self.target_region = "none"
+         # Fixed random box for goal sampling: [xmin, xmax, ymin, ymax, zmin, zmax] (meters)
+         self.target_random_box = np.array(
+-            [-0.40, -0.35, -0.15, 0.15]
+-            if self.require_direction
+-            else [-0.50, -0.35, -0.30, 0.30],
++            # [-0.40, -0.35, -0.15, 0.15]
++            # if self.require_direction
++            # else [-0.50, -0.35, -0.30, 0.30],
++            [-0.50, -0.35, -0.30, 0.30],
+             dtype=np.float64,
+         )
+ 
+-    # ---------- MJCF setup ----------
+-    def _build_scene_and_model(self):
+-        # Copy base_mjcf and construct the world
+-        scene = copy.deepcopy(self.base_mjcf)
+-        world = scene.worldbody
++    def reset(self, *, seed=None, options=None):
++        super().reset(seed=seed)
++        if seed is not None:
++            self.rng = np.random.default_rng(seed)
++        # self.arrival_prefix_steps = 0
+ 
+-        ee_site = scene.find("site", "ee_site")
+-        if ee_site is None:
+-            raise RuntimeError(
+-                "RM75 model must define site 'ee_site' on link_7"
+-            )
+-        self.ee_site_name = "ee_site"
++        # Keep the compiled robot/table model and clear only per-episode
++        # positions, velocities, controls, contacts, and simulation time.
++        mj.mj_resetData(self.model, self.data)
++        self._randomize_table_friction()
+ 
++        # Define the Cartesian start before IK. Noise is applied to the IK
++        # initial guess, so resets remain randomized without recompiling XML.
++        self.start_pos = np.array(
++            [0.4, 0.0, 0.1405 + 0.150],
++            dtype=np.float64,
++        )
+ 
+-        # Fixed tables (large boxes): use half-size
+-        table_size = np.array([0.8 / 2, 1.2 / 2, 0.1405 / 2])  # half-extent (x,y,z) = (1.0, 1.5, 0.1)m
+-        table_h = 0.0
+-        table_xy = np.array([0.3 + 0.8 / 2, 0.1405 / 2])
++        # Initial joint configuration
++        q0 = np.array([
++            -0.003093, 0.447318, 0.003770, 1.458466,
++            -0.000539, 0.552761, 0.0,
++        ], dtype=np.float64)
++        q0 += self.rng.normal(0.0, 0.02, size=self.nq)
+ 
+-        table_names = ["table_1", "table_2"]
+-        table_centers = [
+-            np.array([table_xy[0], table_xy[1], table_h + table_size[2]], dtype=np.float64),
+-            np.array([-table_xy[0], table_xy[1], table_h + table_size[2]], dtype=np.float64),
+-        ]
+-        for name, center in zip(table_names, table_centers):
+-            world.add(
+-                "geom",
+-                name=name,
+-                type="box",
+-                size=table_size,
+-                pos=center.tolist(),
+-                rgba=[0.6, 0.4, 0.3, 1.0],
+-                # reset(seed=...) replaces the sliding coefficient without
+-                # recompiling the fixed scene topology.
+-                friction=[0.6, 0.005, 0.0001]
+-            )
++        # Use IK to initialize near start_pos if enabled
++        if self.use_ik_init and self.start_pos is not None:
++            try:
++                q_ik = self._solve_ik(self.start_pos, q0)
++                if q_ik is not None:
++                    q0 = q_ik
++                    if self.debug:
++                        print("[RESET] IK solver succeeded, using IK solution for initial config")
++                else:
++                    if self.debug:
++                        print("[RESET] IK solver failed, using default config")
++            except Exception as e:
++                if self.debug:
++                    print(f"[RESET] IK solver error: {e}, using default config")
+ 
+-        self.table_names = table_names
+-        self.active_table = None
++        self.data.qpos[:self.nq] = q0
++        self.data.qvel[:] = 0.0
++        mj.mj_forward(self.model, self.data)
++        self.q_target = self.data.qpos[:self.nq].copy()
++        # Immediately latch the current pose as the actuator reference so gravity
++        # does not pull the arm down before the first env.step() call.
++        self._pd_to_ctrl(self.q_target)
+ 
+-        # Sites to visualize start/goal positions (start: red, goal: green)
+-        world.add("site", name="start_site", size=[0.012], rgba=[1.0, 0.2, 0.2, 0.9], pos=[0,0,1])
+-        world.add("site", name="goal_site",  size=[0.012], rgba=[0.2, 1.0, 0.2, 0.9], pos=[0,0,1])
+-        # A green cylinder above the goal shows the required world -Z
+-        # approach direction. It is hidden for the legacy point-only task.
+-        world.add(
+-            "site",
+-            name="goal_direction_site",
+-            type="cylinder",
+-            size=[0.004, 0.08],
+-            pos=[0, 0, 1],
+-            quat=[0, 1, 0, 0],
+-            rgba=[0.1, 0.9, 0.2, 0.85],
+-        )
++        # Run a short warmup to let the PD controller settle before the main loop.
++        warmup_steps = max(0, int(getattr(self, "warmup_steps", 10)))
++        if warmup_steps:
++            self._step_sim(warmup_steps)
+ 
+-        # Compile model
+-        xml = scene.to_xml_string()
+-        assets = scene.get_assets()
+-        self.model = mj.MjModel.from_xml_string(xml, assets=assets)
+-        self.data = mj.MjData(self.model)
++        self.goal_pos = None
++        self._update_visualization_sites()
+ 
+-        expected_joints = [f"joint_{i}" for i in range(1, 8)]
+-        actual_joints = [
+-            mj.mj_id2name(
+-                self.model,
+-                mj.mjtObj.mjOBJ_JOINT,
+-                i,
+-            )
+-            for i in range(self.model.njnt)
+-        ]
+-        if actual_joints != expected_joints:
+-            raise RuntimeError(
+-                f"Unexpected RM75 joint order: {actual_joints}"
+-            )
++        # Goal sampling depending on target_mode
++        mode = self.target_mode
++        if mode == 'fixed':
++            if self.target_pos_cli is not None:
++                self.goal_pos = np.array(self.target_pos_cli, dtype=np.float64)
++            else:
++                self.goal_pos = np.array([-0.4, 0.0, 0.1405+0.15], dtype=np.float64)
++            self.target_region = "fixed"
++        elif mode == 'random':
++            self.goal_pos, self.target_region = self._sample_random_goal()
++        elif mode == 'none':
++            self.goal_pos = None
++            self.target_region = "none"
+ 
+-        expected_actuators = [
+-            f"joint_{i}_pos"
+-            for i in range(1, 8)
+-        ]
+-        actual_actuators = [
+-            mj.mj_id2name(
+-                self.model,
+-                mj.mjtObj.mjOBJ_ACTUATOR,
+-                i,
+-            )
+-            for i in range(self.model.nu)
+-        ]
+-        if actual_actuators != expected_actuators:
+-            raise RuntimeError(
+-                f"Unexpected RM75 actuator order: {actual_actuators}"
+-            )
++        # self.near_start_requested = bool(
++        #     self.near_start_probability > 0.0 and self.goal_pos is not None
++        #     and self.rng.random() < self.near_start_probability
++        # )
++        # self.near_start = self.near_start_requested and self._reset_near_goal()
++        self._update_visualization_sites()
+ 
+-        actuator_joints = [
+-            mj.mj_id2name(
+-                self.model,
+-                mj.mjtObj.mjOBJ_JOINT,
+-                int(joint_id),
+-            )
+-            for joint_id in self.model.actuator_trnid[:, 0]
+-        ]
+-        if actuator_joints != expected_joints:
+-            raise RuntimeError(
+-                "RM75 actuator-to-joint mapping is incorrect: "
+-                f"{actuator_joints}"
+-            )
++        if self.debug:
++            ee_after_reset = self._ee_pos()
++            print(f"[RESET] use_ik_init={self.use_ik_init}")
++            print("[RESET] start_pos=", self.start_pos)
++            print("[RESET] goal_pos=", self.goal_pos)
++            print(f"[RESET] ee_pos after init=", ee_after_reset)
++            if self.start_pos is not None:
++                print(f"[RESET] dist(ee, start)={np.linalg.norm(ee_after_reset - self.start_pos):.4f}")
++            if (self.target_mode or '').lower() == 'random':
++                print("[RESET] random_box=", self.target_random_box)
+ 
+-        # name → id caches
+-        self.geom_name2id = {mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_GEOM, i): i
+-                             for i in range(self.model.ngeom)}
+-        self.site_name2id = {mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_SITE, i): i
+-                             for i in range(self.model.nsite)}
+-        self.ee_sid   = self.site_name2id.get(self.ee_site_name, None)
+-        self.start_sid = self.site_name2id["start_site"]
+-        self.goal_sid  = self.site_name2id["goal_site"]
+-        self.goal_direction_sid = self.site_name2id["goal_direction_site"]
+-        self.model.site_rgba[self.goal_direction_sid, 3] = (
+-            0.85 if self.require_direction else 0.0
+-        )
++        return self._finish_reset()
+ 
+-        self.table_geom_ids = {
+-            self.geom_name2id[name]
+-            for name in self.table_names
+-        }
+-        self.floor_geom_id = self.geom_name2id["floor"]
+-        self.robot_geom_ids = self._find_robot_geom_ids()
+-        if len(self.robot_geom_ids) != 8:
+-            raise RuntimeError(
+-                "Expected eight RM75 collision geoms "
+-                f"(base_link plus link_1..link_7), got "
+-                f"{sorted(self.robot_geom_ids)}"
++    def step(self, action):
++        self.step_i += 1
++        action = np.asarray(action, dtype=np.float32)
++        if action.shape != (self.nu,):
++            raise ValueError(
++                f"Expected RM75 action shape {(self.nu,)}, got {action.shape}"
+             )
++        normalized_action = np.clip(
++            action,
++            self.action_space.low,
++            self.action_space.high,
++        ).astype(np.float64)
++        joint_delta = self.action_scale * normalized_action
+ 
+-        if self.debug and not self._once_logged:
+-            print(f"[ENV] ee_site_name='{self.ee_site_name}', ee_sid={self.ee_sid}")
+-            print(f"[ENV] joints={self.nq}, actuators={self.nu}, ctrl_mode={self.ctrl_mode}")
+-            try:
+-                bid = self.model.site_bodyid[self.ee_sid] if self.ee_sid is not None else -1
+-                bname = mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_BODY, int(bid)) if bid >= 0 else "None"
+-                loc = self.model.site_pos[self.ee_sid] if self.ee_sid is not None else None
+-                print(f"[ENV] ee_site body='{bname}' (id={bid}), local pos={loc}")
+-            except Exception:
+-                pass
+-            self._once_logged = True
+-
+-    def _find_robot_geom_ids(self):
+-        """Return collision geom IDs for the base and seven RM75 links."""
+-        link_body_ids = {
+-            f"link_{index}": mj.mj_name2id(
+-                self.model,
+-                mj.mjtObj.mjOBJ_BODY,
+-                f"link_{index}",
+-            )
+-            for index in range(1, 8)
+-        }
+-        if -1 in link_body_ids.values():
+-            raise RuntimeError("RM75 link body lookup failed")
++        if self.q_target is None or self.q_target.shape[0] != self.nq:
++            self.q_target = self.data.qpos[:self.nq].copy()
+ 
+-        link_geom_ids = {
+-            link_name: {
+-                geom_id
+-                for geom_id in range(self.model.ngeom)
+-                if int(self.model.geom_bodyid[geom_id]) == body_id
+-            }
+-            for link_name, body_id in link_body_ids.items()
+-        }
+-        robot_geom_ids = set().union(*link_geom_ids.values())
++        self.q_target = self.q_target.astype(np.float64) + joint_delta
+ 
+-        base_mesh_id = mj.mj_name2id(
+-            self.model,
+-            mj.mjtObj.mjOBJ_MESH,
+-            "base_link",
+-        )
+-        if base_mesh_id < 0:
+-            raise RuntimeError("RM75 base_link mesh lookup failed")
+-        base_geom_ids = {
+-            geom_id
+-            for geom_id in range(self.model.ngeom)
+-            if (
+-                int(self.model.geom_type[geom_id])
+-                == int(mj.mjtGeom.mjGEOM_MESH)
+-                and int(self.model.geom_dataid[geom_id]) == base_mesh_id
+-            )
+-        }
+-        self.base_geom_ids = base_geom_ids
+-        robot_geom_ids.update(base_geom_ids)
++        if self.model is not None and getattr(self.model, "njnt", 0) >= self.nq:
++            jrange = self.model.jnt_range[:self.nq]
++            for j in range(self.nq):
++                lo, hi = jrange[j]
++                if np.isfinite(lo) and np.isfinite(hi):
++                    self.q_target[j] = np.clip(self.q_target[j], lo, hi)
+ 
+-        # Neighboring link meshes meet at their joint by construction. These
+-        # contacts are structural, not robot self-collisions that should end an
+-        # episode. Non-neighboring RM75 geom contacts remain collisions.
+-        adjacent_groups = [
+-            base_geom_ids,
+-            *[
+-                link_geom_ids[f"link_{index}"]
+-                for index in range(1, 8)
+-            ],
+-        ]
+-        self.allowed_adjacent_robot_geom_pairs = {
+-            frozenset((left_geom, right_geom))
+-            for left_group, right_group in zip(
+-                adjacent_groups,
+-                adjacent_groups[1:],
+-            )
+-            for left_geom in left_group
+-            for right_geom in right_group
+-        }
+-        return robot_geom_ids
+-
+-    def _randomize_table_friction(self):
+-        """Apply reset-seeded table friction without rebuilding the model."""
+-        table_friction = np.empty((len(self.table_names), 3), dtype=np.float64)
+-        for index, name in enumerate(self.table_names):
+-            table_friction[index] = [
+-                self.rng.uniform(0.4, 0.9),
+-                0.005,
+-                0.0001,
+-            ]
+-            geom_id = self.geom_name2id[name]
+-            self.model.geom_friction[geom_id] = table_friction[index]
+-        self.table_friction = table_friction
+-
+-    def _update_visualization_sites(self):
+-        """Keep the point marker and fixed -Z approach line at the goal."""
+-        if self.start_pos is not None:
+-            self.model.site_pos[self.start_sid] = self.start_pos
+-        if self.goal_pos is None:
+-            return
+-        self.model.site_pos[self.goal_sid] = self.goal_pos
+-        # The 16 cm cylinder is centered 8 cm opposite the direction vector,
+-        # so it terminates at the green target point for the default world -Z
+-        # approach direction.
+-        self.model.site_pos[self.goal_direction_sid] = (
+-            self.goal_pos - 0.08 * self.goal_direction
+-        )
+-
+-    def _fallback_interactive_viewer(self):
+-        """Fallback loop using mujoco-python-viewer (GLFW)."""
+-        try:
+-            import mujoco_viewer
+-        except Exception as e:
+-            print("Fallback viewer unavailable:", e)
+-            print("Hint: fix ~/.config/mujoco_viewer permissions or install mujoco-python-viewer:")
+-            print("  pip install mujoco-python-viewer glfw")
+-            return
+-        viewer = None
+-        try:
+-            viewer = mujoco_viewer.MujocoViewer(self.model, self.data)
+-            print("[Interactive] Fallback viewer active. Press Ctrl+C to exit.")
+-            while True:
+-                self._update_visualization_sites()
+-                self._pd_to_ctrl(self.data.qpos[:self.nq])
+-                mj.mj_step(self.model, self.data)
+-                viewer.render()
+-        except KeyboardInterrupt:
+-            pass
+-        except Exception as e:
+-            print("Fallback viewer closed:", e)
+-        finally:
+-            try:
+-                if viewer is not None:
+-                    viewer.close()
+-            except Exception:
+-                pass
++        self._update_visualization_sites()
++        self._step_sim(self.substeps)
+ 
+-    # ---------- Interactive viewer (blocking) ----------
+-    def interactive_viewer(self):
+-        """Open the built-in MuJoCo viewer and block until the window closes.
+-        Tip: Use the right panel -> Actuation/Controls sliders to move joints.
+-        """
+-        try:
+-            import mujoco.viewer as mjv
+-            # On macOS, the built-in viewer requires running under 'mjpython'
+-            if sys.platform == "darwin" and not os.path.basename(sys.executable).startswith("mjpython"):
+-                print("Tip: On macOS, run with 'mjpython env.py --interactive' for the built-in viewer.")
+-                return self._fallback_interactive_viewer()
+-        except Exception as e:
+-            print("Built-in viewer unavailable:", e)
+-            # Fallback to non-blocking path
+-            self.render_mode = "human"
++        if self.render_mode == "human":
+             self.render()
+-            print("Fallback viewer started (non-blocking). Close the window or Ctrl+C to exit.")
+-            try:
+-                while True:
+-                    time.sleep(0.1)
+-            except KeyboardInterrupt:
+-                return
+-
+-        # Ensure model/data exist
+-        if self.model is None or self.data is None:
+-            self._build_scene_and_model()
+-            mj.mj_forward(self.model, self.data)
+ 
+-        print("[Interactive] Use the right panel's Actuation sliders to move joints. Close the window to exit.")
+-        q_hold = self.data.qpos[:self.nq].copy()
+-        try:
+-            with mjv.launch_passive(self.model, self.data) as viewer:
+-                while viewer.is_running():
+-                    self._update_visualization_sites()
+-                    self._pd_to_ctrl(q_hold)
+-                    mj.mj_step(self.model, self.data)
+-                    viewer.sync()
+-        except RuntimeError as e:
+-            print("Built-in viewer couldn't start:", e)
+-            return self._fallback_interactive_viewer()
++        # Collision check
++        collided = self._check_collision()
+ 
++        # Compute position/direction errors and the strict success flag.
++        # Compute position error and point-task success.
++        ee_pos = self._ee_pos()
++        cfg = self.reward_cfg
++        if self.goal_pos is not None:
++            dist = np.linalg.norm(ee_pos - self.goal_pos)
++            position_success = dist < cfg["dist_success_thresh"]
++        else:
++            dist = None
++            position_success = False
+ 
+-    # ---------- Gym API ----------
+-    def reset(self, *, seed=None, options=None):
+-        super().reset(seed=seed)
+-        if seed is not None:
+-            self.rng = np.random.default_rng(seed)
+-        self.arrival_prefix_steps = 0
++        # direction_angle = (
++        #     self._direction_angle()
++        #     if self.require_direction and self.goal_pos is not None
++        #     else None
++        # )
++        # direction_success = bool(
++        #     not self.require_direction
++        #     or (
++        #         direction_angle is not None
++        #         and direction_angle < cfg["direction_success_thresh"]
++        #     )
++        # )
++        # candidate_success = bool(position_success and direction_success and not collided)
++        candidate_success = bool(position_success and not collided)
++        self.position_reached = bool(
++            self.position_reached or position_success
++        )
++        # self.direction_reached = bool(
++        #     self.direction_reached or candidate_success
++        # )
++        # self.angle_reached = bool(self.angle_reached or direction_success)
++        # if position_success and direction_angle is not None:
++        #     self.min_direction_angle_at_position_deg = min(
++        #         self.min_direction_angle_at_position_deg,
++        #         math.degrees(direction_angle),
++        #     )
++        # if self.require_direction:
++        #     self.direction_hold_steps = (
++        #         self.direction_hold_steps + 1
++        #         if candidate_success
++        #         else 0
++        #     )
++        #     success = (
++        #         self.direction_hold_steps
++        #         >= cfg["direction_hold_steps"]
++        #     )
++        # else:
++        #     success = candidate_success
++
++        # direction_progress = self._compute_direction_progress(
++        #     self.prev_direction_angle, direction_angle, self.prev_dist, dist,
++        # )
++
++        success = candidate_success
+ 
+-        # Keep the compiled robot/table model and clear only per-episode
+-        # positions, velocities, controls, contacts, and simulation time.
+-        mj.mj_resetData(self.model, self.data)
+-        self._randomize_table_friction()
++        truncated = self.step_i >= self.horizon
++        timed_out = bool(truncated and not success and not collided)
+ 
+-        # Define the Cartesian start before IK. Noise is applied to the IK
+-        # initial guess, so resets remain randomized without recompiling XML.
+-        self.start_pos = np.array(
+-            [0.4, 0.0, 0.1405 + 0.150],
+-            dtype=np.float64,
++        reward, reward_components = self._compute_reward(
++            dist=dist,
++            prev_dist=self.prev_dist,
++            collided=collided,
++            success=success,
++            timed_out=timed_out,
++            # direction_progress=direction_progress,
++            # direction_angle=direction_angle,
+         )
++        self.prev_dist = dist if dist is not None else 0.0
++        # self.prev_direction_angle = direction_angle
+ 
+-        # Initial joint configuration
+-        q0 = np.array([
+-            -0.003093, 0.447318, 0.003770, 1.458466,
+-            -0.000539, 0.552761, 0.0,
+-        ], dtype=np.float64)
+-        q0 += self.rng.normal(0.0, 0.02, size=self.nq)
++        terminated = bool(success or collided)
+ 
+-        # Use IK to initialize near start_pos if enabled
+-        if self.use_ik_init and self.start_pos is not None:
+-            try:
+-                q_ik = self._solve_ik(self.start_pos, q0)
+-                if q_ik is not None:
+-                    q0 = q_ik
+-                    if self.debug:
+-                        print("[RESET] IK solver succeeded, using IK solution for initial config")
+-                else:
+-                    if self.debug:
+-                        print("[RESET] IK solver failed, using default config")
+-            except Exception as e:
+-                if self.debug:
+-                    print(f"[RESET] IK solver error: {e}, using default config")
++        obs = self._get_obs()
++        info = {
++            "success": success,
++            "collision": collided,
++            "timeout": timed_out,
++            "dist": dist,
++            "position_success": position_success,
++            # "direction_success": direction_success,
++            "position_reached": self.position_reached,
++            # "direction_reached": self.direction_reached,
++            # "angle_reached": self.angle_reached,
++            # "pose_reached": self.direction_reached,
++            # # 180 degrees also represents never entering the position range.
++            # "min_direction_angle_at_position_deg": (
++            #     self.min_direction_angle_at_position_deg
++            # ),
++            # "direction_angle": direction_angle,
++            # "direction_angle_deg": (
++            #     math.degrees(direction_angle)
++            #     if direction_angle is not None
++            #     else None
++            # ),
++            # "direction_hold_steps": self.direction_hold_steps,
++            "target_region": self.target_region,
++            # "near_start": self.near_start,
++            # "near_start_requested": self.near_start_requested,
++            # "arrival_prefix_steps": self.arrival_prefix_steps,
++            "reward_components": reward_components,
++            "active_table": getattr(self, "active_table", None),
++        }
++        return obs, reward, terminated, truncated, info
+ 
+-        self.data.qpos[:self.nq] = q0
+-        self.data.qvel[:] = 0.0
+-        mj.mj_forward(self.model, self.data)
+-        self.q_target = self.data.qpos[:self.nq].copy()
+-        # Immediately latch the current pose as the actuator reference so gravity
+-        # does not pull the arm down before the first env.step() call.
+-        self._pd_to_ctrl(self.q_target)
++    def render(self):
++        if self.render_mode == "rgb_array":
++            # Off-screen rendering for video recording
++            if not hasattr(self, "_offscreen_renderer"):
++                from mujoco import Renderer
++                # HD resolution: 1280x720 (instead of 640x480)
++                self._offscreen_renderer = Renderer(self.model, height=480, width=1280)
+ 
+-        # Run a short warmup to let the PD controller settle before the main loop.
+-        warmup_steps = max(0, int(getattr(self, "warmup_steps", 10)))
+-        if warmup_steps:
+-            self._step_sim(warmup_steps)
++            self._update_visualization_sites()
+ 
+-        self.goal_pos = None
+-        self._update_visualization_sites()
++            # Forward kinematics to update visualization
++            mj.mj_forward(self.model, self.data)
+ 
+-        # Goal sampling depending on target_mode
+-        mode = self.target_mode
+-        if mode == 'fixed':
+-            if self.target_pos_cli is not None:
+-                self.goal_pos = np.array(self.target_pos_cli, dtype=np.float64)
+-            else:
+-                self.goal_pos = np.array([-0.4, 0.0, 0.1405+0.15], dtype=np.float64)
+-            self.target_region = "fixed"
+-        elif mode == 'random':
+-            self.goal_pos, self.target_region = self._sample_random_goal()
+-        elif mode == 'none':
+-            self.goal_pos = None
+-            self.target_region = "none"
++            # Render and return RGB array
++            self._offscreen_renderer.update_scene(self.data)
++            return self._offscreen_renderer.render()
+ 
+-        self.near_start_requested = bool(
+-            self.near_start_probability > 0.0 and self.goal_pos is not None
+-            and self.rng.random() < self.near_start_probability
+-        )
+-        self.near_start = self.near_start_requested and self._reset_near_goal()
+-        self._update_visualization_sites()
++        elif self.render_mode == "human":
++            if getattr(self, "viewer_failed", False):
++                return
++            if self.viewer is None:
++                # 1) Try MuJoCo built-in viewer first
++                try:
++                    import mujoco.viewer as mjv
++                    self.viewer = mjv.launch_passive(self.model, self.data)
++                    self._viewer_builtin = True
++                except Exception:
++                    # 2) Fallback to mujoco-python-viewer
++                    try:
++                        import mujoco_viewer
++                        self.viewer = mujoco_viewer.MujocoViewer(self.model, self.data)
++                        self._viewer_builtin = False
++                    except Exception as e:
++                        if not self.viewer_failed:
++                            print("Viewer unavailable (will not retry):", e)
++                        self.viewer_failed = True
++                        return
++            # Draw a frame
++            try:
++                if self._viewer_builtin:
++                    if hasattr(self.viewer, "is_running") and not self.viewer.is_running():
++                        self.viewer_failed = True
++                        return
++                    self.viewer.sync()
++                else:
++                    self.viewer.render()
++            except Exception:
++                self.viewer_failed = True
++                return
+ 
+-        if self.debug:
+-            ee_after_reset = self._ee_pos()
+-            print(f"[RESET] use_ik_init={self.use_ik_init}")
+-            print("[RESET] start_pos=", self.start_pos)
+-            print("[RESET] goal_pos=", self.goal_pos)
+-            print(f"[RESET] ee_pos after init=", ee_after_reset)
+-            if self.start_pos is not None:
+-                print(f"[RESET] dist(ee, start)={np.linalg.norm(ee_after_reset - self.start_pos):.4f}")
+-            if (self.target_mode or '').lower() == 'random':
+-                print("[RESET] random_box=", self.target_random_box)
++    def close(self):
++        if self.viewer is not None:
++            try:
++                if hasattr(self.viewer, "close"):
++                    self.viewer.close()
++            except Exception:
++                pass
++            self.viewer = None
+ 
+-        return self._finish_reset()
++        # Clean up offscreen renderer if it exists
++        if hasattr(self, "_offscreen_renderer"):
++            try:
++                self._offscreen_renderer.close()
++            except Exception:
++                pass
++
++    # ==================== 2. 回合初始化与目标生成 ====================
+ 
+     def _finish_reset(self):
+         """Start a fresh episode without changing the current physical state."""
+         self.step_i = 0
+-        self._milestone_20cm_claimed = False
+-        self._milestone_10cm_claimed = False
+-        self._pose_milestones_claimed.clear()
+-        self.direction_hold_steps = 0
++        # self.direction_hold_steps = 0
+         self.position_reached = False
+-        self.direction_reached = False
+-        self.angle_reached = False
+-        self.min_direction_angle_at_position_deg = 180.0
++        # self.direction_reached = False
++        # self.angle_reached = False
++        # self.min_direction_angle_at_position_deg = 180.0
+ 
+         # Initialize distance used for progress calculation (0 if no goal)
+ 
+@@ -584,20 +476,12 @@ class RM75P2PEnv(gym.Env):
+             self.prev_dist = np.linalg.norm(ee_pos - self.goal_pos)
+         else:
+             self.prev_dist = 0.0
+-        direction_angle = (
+-            self._direction_angle()
+-            if self.require_direction and self.goal_pos is not None
+-            else None
+-        )
+-        self.prev_direction_angle = direction_angle
+-        if self.near_start:
+-            # Already-satisfied starting milestones are not new achievements.
+-            self._pose_milestones_claimed.update(
+-                index for index, (distance, angle, _) in enumerate(
+-                    self.reward_cfg["pose_milestones"]
+-                )
+-                if self.prev_dist < distance and direction_angle < angle
+-            )
++        # direction_angle = (
++        #     self._direction_angle()
++        #     if self.require_direction and self.goal_pos is not None
++        #     else None
++        # )
++        # self.prev_direction_angle = direction_angle
+ 
+         if self.render_mode == "human":
+             self.render()
+@@ -607,249 +491,143 @@ class RM75P2PEnv(gym.Env):
+             "q_start": self.data.qpos[:self.nq].copy(),
+             "active_table": getattr(self, "active_table", None),
+             "target_region": self.target_region,
+-            "near_start": self.near_start,
+-            "near_start_requested": self.near_start_requested,
+-            "arrival_prefix_steps": self.arrival_prefix_steps,
++            # "near_start": self.near_start,
++            # "near_start_requested": self.near_start_requested,
++            # "arrival_prefix_steps": self.arrival_prefix_steps,
+             "dist": self.prev_dist,
+-            "direction_angle": direction_angle,
+-            "direction_angle_deg": (
+-                math.degrees(direction_angle)
+-                if direction_angle is not None
+-                else None
+-            ),
++            # "direction_angle": direction_angle,
++            # "direction_angle_deg": (
++            #     math.degrees(direction_angle)
++            #     if direction_angle is not None
++            #     else None
++            # ),
+         }
+         return obs, info
+ 
+-    def _reset_near_goal(self):
+-        """IK creates only a non-success start; every agent action remains PPO."""
+-        spec = mj.mjtState.mjSTATE_INTEGRATION
+-        saved = np.empty(mj.mj_stateSize(self.model, spec))
+-        mj.mj_getState(self.model, self.data, saved, spec)
+-        reference = self.q_target.copy()
+-        goal_direction = self.goal_direction.copy()
+-        for _ in range(8):
+-            # Practice position holding plus rotation, not another long reach.
+-            radius = self.rng.uniform(0.045, 0.055)
+-            height = self.rng.uniform(0.03, 0.04)
+-            azimuth = self.rng.uniform(-math.pi / 2, math.pi / 2)
+-            horizontal = math.sqrt(radius ** 2 - height ** 2)
+-            start = self.goal_pos + np.array([
+-                horizontal * math.cos(azimuth),
+-                horizontal * math.sin(azimuth), height,
+-            ])
+-            tilt = self.rng.uniform(math.radians(29), math.radians(31))
+-            yaw = self.rng.uniform(0.0, 2.0 * math.pi)
+-            self.goal_direction = np.array([
+-                math.sin(tilt) * math.cos(yaw),
+-                math.sin(tilt) * math.sin(yaw), -math.cos(tilt),
+-            ])
+-            try:
+-                q = self.solve_direction_ik(
+-                    start, reference + self.rng.normal(0.0, 0.02, self.nq),
+-                )
+-            except np.linalg.LinAlgError:
+-                q = None
+-            finally:
+-                self.goal_direction = goal_direction
+-            if q is None or not np.all(np.isfinite(q)):
+-                continue
+-            mj.mj_resetData(self.model, self.data)
+-            self.data.qpos[:self.nq] = q
+-            self.q_target = q.copy()
+-            self._pd_to_ctrl(self.q_target)
+-            self._step_sim(max(0, int(getattr(self, "warmup_steps", 10))))
+-            distance = float(np.linalg.norm(self._ee_pos() - self.goal_pos))
+-            angle = math.degrees(self._direction_angle())
+-            if (
+-                0.04 <= distance <= 0.06 and 25.0 <= angle <= 35.0
+-                and not self._check_collision()
+-            ):
+-                self.start_pos = self._ee_pos()
+-                return True
+-        mj.mj_setState(self.model, self.data, saved, spec)
+-        self.q_target = reference
+-        mj.mj_forward(self.model, self.data)
+-        return False
++    # 以下近处初始化方法为停用方向任务历史代码，不执行。
++    # def _reset_near_goal(self):
++    #     """IK creates only a non-success start; every agent action remains PPO."""
++    #     spec = mj.mjtState.mjSTATE_INTEGRATION
++    #     saved = np.empty(mj.mj_stateSize(self.model, spec))
++    #     mj.mj_getState(self.model, self.data, saved, spec)
++    #     reference = self.q_target.copy()
++    #     goal_direction = self.goal_direction.copy()
++    #     for _ in range(8):
++    #         # Practice position holding plus rotation, not another long reach.
++    #         radius = self.rng.uniform(0.045, 0.055)
++    #         height = self.rng.uniform(0.03, 0.04)
++    #         azimuth = self.rng.uniform(-math.pi / 2, math.pi / 2)
++    #         horizontal = math.sqrt(radius ** 2 - height ** 2)
++    #         start = self.goal_pos + np.array([
++    #             horizontal * math.cos(azimuth),
++    #             horizontal * math.sin(azimuth), height,
++    #         ])
++    #         tilt = self.rng.uniform(math.radians(29), math.radians(31))
++    #         yaw = self.rng.uniform(0.0, 2.0 * math.pi)
++    #         self.goal_direction = np.array([
++    #             math.sin(tilt) * math.cos(yaw),
++    #             math.sin(tilt) * math.sin(yaw), -math.cos(tilt),
++    #         ])
++    #         try:
++    #             q = self.solve_direction_ik(
++    #                 start, reference + self.rng.normal(0.0, 0.02, self.nq),
++    #             )
++    #         except np.linalg.LinAlgError:
++    #             q = None
++    #         finally:
++    #             self.goal_direction = goal_direction
++    #         if q is None or not np.all(np.isfinite(q)):
++    #             continue
++    #         mj.mj_resetData(self.model, self.data)
++    #         self.data.qpos[:self.nq] = q
++    #         self.q_target = q.copy()
++    #         self._pd_to_ctrl(self.q_target)
++    #         self._step_sim(max(0, int(getattr(self, "warmup_steps", 10))))
++    #         distance = float(np.linalg.norm(self._ee_pos() - self.goal_pos))
++    #         angle = math.degrees(self._direction_angle())
++    #         if (
++    #             0.04 <= distance <= 0.06 and 25.0 <= angle <= 35.0
++    #             and not self._check_collision()
++    #         ):
++    #             self.start_pos = self._ee_pos()
++    #             return True
++    #     mj.mj_setState(self.model, self.data, saved, spec)
++    #     self.q_target = reference
++    #     mj.mj_forward(self.model, self.data)
++    #     return False
+ 
+     def _sample_random_goal(self):
+-        """Sample a full-box goal or a diagnosed hard-region mixture."""
+-        xmin, xmax, ymin, ymax = self.target_random_box.tolist()
+-        x_low, x_high = min(xmin, xmax), max(xmin, xmax)
+-        y_low, y_high = min(ymin, ymax), max(ymin, ymax)
+-
+-        if self.target_sampling == "uniform":
+-            region = "uniform"
+-            x = self.rng.uniform(x_low, x_high)
+-            y = self.rng.uniform(y_low, y_high)
+-        else:
+-            draw = self.rng.random()
+-            if draw < 0.50:
+-                region = "uniform"
+-                x = self.rng.uniform(x_low, x_high)
+-                y = self.rng.uniform(y_low, y_high)
+-            elif draw < 0.75:
+-                region = "hard_negative_y"
+-                x = self.rng.uniform(x_low, x_high)
+-                y = self.rng.uniform(y_low, -0.15)
+-            else:
+-                region = "hard_far_x"
+-                x = self.rng.uniform(x_low, -0.45)
+-                y = self.rng.uniform(y_low, y_high)
+-
+-        goal = np.array([x, y, 0.2905], dtype=np.float64)
+-        return goal, region
+-
+-
+-    def _pd_to_ctrl(self, q_des):
+-        """Send desired joint angles to the seven position actuators."""
+-        self.data.ctrl[:self.nu] = q_des[:self.nu]
+-
+-    def _step_sim(self, n=1, hold_target=True):
+-        for _ in range(n):
+-            if hold_target and self.q_target is not None:
+-                self._pd_to_ctrl(self.q_target)
+-            mj.mj_step(self.model, self.data)
+-
+-    def step(self, action):
+-        self.step_i += 1
+-        action = np.asarray(action, dtype=np.float32)
+-        if action.shape != (self.nu,):
+-            raise ValueError(
+-                f"Expected RM75 action shape {(self.nu,)}, got {action.shape}"
+-            )
+-        normalized_action = np.clip(
+-            action,
+-            self.action_space.low,
+-            self.action_space.high,
+-        ).astype(np.float64)
+-        joint_delta = self.action_scale * normalized_action
+-
+-        if self.q_target is None or self.q_target.shape[0] != self.nq:
+-            self.q_target = self.data.qpos[:self.nq].copy()
+-
+-        self.q_target = self.q_target.astype(np.float64) + joint_delta
+-
+-        if self.model is not None and getattr(self.model, "njnt", 0) >= self.nq:
+-            jrange = self.model.jnt_range[:self.nq]
+-            for j in range(self.nq):
+-                lo, hi = jrange[j]
+-                if np.isfinite(lo) and np.isfinite(hi):
+-                    self.q_target[j] = np.clip(self.q_target[j], lo, hi)
+-
+-        self._update_visualization_sites()
+-        self._step_sim(self.substeps)
+-
+-        if self.render_mode == "human":
+-            self.render()
+-
+-        # Collision check
+-        collided = self._check_collision()
+-
+-        # Compute position/direction errors and the strict success flag.
+-        ee_pos = self._ee_pos()
+-        cfg = self.reward_cfg
+-        if self.goal_pos is not None:
+-            dist = np.linalg.norm(ee_pos - self.goal_pos)
+-            position_success = dist < cfg["dist_success_thresh"]
+-        else:
+-            dist = None
+-            position_success = False
+-
+-        direction_angle = (
+-            self._direction_angle()
+-            if self.require_direction and self.goal_pos is not None
+-            else None
+-        )
+-        direction_success = bool(
+-            not self.require_direction
+-            or (
+-                direction_angle is not None
+-                and direction_angle < cfg["direction_success_thresh"]
+-            )
+-        )
+-        candidate_success = bool(position_success and direction_success)
+-        self.position_reached = bool(
+-            self.position_reached or position_success
+-        )
+-        self.direction_reached = bool(
+-            self.direction_reached or candidate_success
+-        )
+-        self.angle_reached = bool(self.angle_reached or direction_success)
+-        if position_success and direction_angle is not None:
+-            self.min_direction_angle_at_position_deg = min(
+-                self.min_direction_angle_at_position_deg,
+-                math.degrees(direction_angle),
+-            )
+-        if self.require_direction:
+-            self.direction_hold_steps = (
+-                self.direction_hold_steps + 1
+-                if candidate_success
+-                else 0
+-            )
+-            success = (
+-                self.direction_hold_steps
+-                >= cfg["direction_hold_steps"]
+-            )
+-        else:
+-            success = candidate_success
+-
+-        direction_progress = self._compute_direction_progress(
+-            self.prev_direction_angle, direction_angle, self.prev_dist, dist,
+-        )
+-
+-        truncated = self.step_i >= self.horizon
+-        timed_out = bool(truncated and not success and not collided)
+-        milestone_reward = self._compute_milestone_reward(dist, direction_angle)
+-
+-        reward, reward_components = self._compute_reward(
+-            dist=dist,
+-            prev_dist=self.prev_dist,
+-            collided=collided,
+-            success=success,
+-            timed_out=timed_out,
+-            milestone_reward=milestone_reward,
+-            direction_progress=direction_progress,
+-            direction_angle=direction_angle,
++        """Uniform proposals; accept only IK-verified collision-free endpoints."""
++        xmin, xmax, ymin, ymax = self.target_random_box.tolist()
++        x_low, x_high = min(xmin, xmax), max(xmin, xmax)
++        y_low, y_high = min(ymin, ymax), max(ymin, ymax)
++
++        for _ in range(50):
++            goal = np.array([
++                self.rng.uniform(x_low, x_high),
++                self.rng.uniform(y_low, y_high),
++                0.2905,
++            ], dtype=np.float64)
++            if self._is_goal_reachable(goal):
++                return goal, "uniform"
++
++        raise RuntimeError(
++            "No IK-verified collision-free goal found after 50 candidates. "
++            "Check the target box, IK seeds, and collision model."
+         )
+-        self.prev_dist = dist if dist is not None else 0.0
+-        self.prev_direction_angle = direction_angle
+ 
+-        terminated = bool(success or collided)
++    def _is_goal_reachable(self, goal):
++        """Find a legal endpoint witness without moving the live robot."""
++        goal = np.asarray(goal, dtype=np.float64)
++        if goal.shape != (3,) or not np.all(np.isfinite(goal)):
++            return False
+ 
+-        obs = self._get_obs()
+-        info = {
+-            "success": success,
+-            "collision": collided,
+-            "timeout": timed_out,
+-            "dist": dist,
+-            "position_success": position_success,
+-            "direction_success": direction_success,
+-            "position_reached": self.position_reached,
+-            "direction_reached": self.direction_reached,
+-            "angle_reached": self.angle_reached,
+-            "pose_reached": self.direction_reached,
+-            # 180 degrees also represents never entering the position range.
+-            "min_direction_angle_at_position_deg": (
+-                self.min_direction_angle_at_position_deg
+-            ),
+-            "direction_angle": direction_angle,
+-            "direction_angle_deg": (
+-                math.degrees(direction_angle)
+-                if direction_angle is not None
+-                else None
+-            ),
+-            "direction_hold_steps": self.direction_hold_steps,
+-            "target_region": self.target_region,
+-            "near_start": self.near_start,
+-            "near_start_requested": self.near_start_requested,
+-            "arrival_prefix_steps": self.arrival_prefix_steps,
+-            "reward_components": reward_components,
+-            "active_table": getattr(self, "active_table", None),
+-        }
+-        return obs, reward, terminated, truncated, info
+-        if timed_out:
+-            timeout_reward = -cfg["timeout_penalty"]
+-            reward += timeout_reward
++        data = self._goal_ik_data
++        ranges = self.model.jnt_range[:self.nq]
++        for seed in self._goal_ik_seeds:
++            mj.mj_resetData(self.model, data)
++            try:
++                q = self._solve_ik(goal, seed, data=data)
++            except np.linalg.LinAlgError:
++                continue
++            if q is None:
++                continue
++            q = np.asarray(q, dtype=np.float64)
++            if q.shape != (self.nq,) or not np.all(np.isfinite(q)):
++                continue
++            if np.any(q < ranges[:, 0]) or np.any(q > ranges[:, 1]):
++                continue
++
++            data.qpos[:self.nq] = q
++            data.qvel[:] = 0.0
++            if self._check_collision(data=data):
++                continue
++            error = np.linalg.norm(data.site_xpos[self.ee_sid] - goal)
++            if error < self.ik_tolerance:
++                return True
++        return False
++
++    # ==================== 3. 观测与奖励 ====================
++
++    def _get_obs(self):
++        q = self.data.qpos[:self.nq].copy()
++        qd = self.data.qvel[:self.nq].copy()
++        ee = self._ee_pos()
++        goal = self.goal_pos if self.goal_pos is not None else np.zeros(3)
++        coll = float(self._check_collision())
++        obs = np.concatenate([
++            q,
++            qd,
++            ee.astype(np.float64),
++            goal.astype(np.float64),
++            np.array([coll], dtype=np.float64)
++        ]).astype(np.float32)
++        # if self.require_direction:
++        #     obs = np.concatenate([
++        #         obs,
++        #         self._direction_error().astype(np.float32),
++        #     ]).astype(np.float32)
++        return obs
+ 
+     def _compute_reward(
+         self,
+@@ -858,9 +636,8 @@ class RM75P2PEnv(gym.Env):
+         collided: bool,
+         success: bool,
+         timed_out: bool = False,
+-        milestone_reward: float = 0.0,
+-        direction_progress: float = 0.0,
+-        direction_angle: float | None = None,
++        # direction_progress: float = 0.0,
++        # direction_angle: float | None = None,
+     ):
+         """
+         Centralized reward computation.
+@@ -872,10 +649,12 @@ class RM75P2PEnv(gym.Env):
+ 
+         # Absolute distance improvement; direction shaping adds a bounded
+         # near-goal error difference, not a reward for angle-only success.
++        # Distance progress within the current episode.
+         progress = 0.0
+         if (
+             dist is not None and prev_dist is not None
+-            and (self.require_direction or prev_dist != 0.0)
++            # and (self.require_direction or prev_dist != 0.0)
++            and prev_dist != 0.0
+         ):
+             progress = cfg["progress_scale"] * (prev_dist - dist)
+ 
+@@ -884,23 +663,22 @@ class RM75P2PEnv(gym.Env):
+         if dist is not None:
+             dist_penalty = -cfg["dist_weight"] * dist
+ 
+-        # Progress alone gives no signal for lingering at a wrong angle.
+-        # Keep this small and near-only; 0.05/0.15 < 0.5 prevents a fixed-
+-        # angle retreat from reducing the combined distance/angular cost.
+-        direction_cost = 0.0
+-        if self.require_direction and direction_angle is not None:
+-            direction_cost = (
+-                -cfg["direction_cost_weight"] * self._direction_gate(dist)
+-                * float(direction_angle) / math.pi
+-            )
++        # # Progress alone gives no signal for lingering at a wrong angle.
++        # # Keep this small and near-only; 0.05/0.15 < 0.5 prevents a fixed-
++        # # angle retreat from reducing the combined distance/angular cost.
++        # direction_cost = 0.0
++        # if self.require_direction and direction_angle is not None:
++        #     direction_cost = (
++        #         -cfg["direction_cost_weight"] * self._direction_gate(dist)
++        #         * float(direction_angle) / math.pi
++        #     )
+ 
+         reward = 0.0
+         reward += progress
+         reward += dist_penalty
+         reward -= cfg["time_penalty"]
+-        reward += milestone_reward
+-        reward += direction_progress
+-        reward += direction_cost
++        # reward += direction_progress
++        # reward += direction_cost
+ 
+         collision_reward = 0.0
+         if collided:
+@@ -917,46 +695,330 @@ class RM75P2PEnv(gym.Env):
+             timeout_reward = -cfg["timeout_penalty"]
+             reward += timeout_reward
+ 
+-        components = {
+-            "progress": progress,
+-            "dist_penalty": dist_penalty,
+-            "time": -cfg["time_penalty"],
+-            "milestone": milestone_reward,
+-            "direction_progress": direction_progress,
+-            "direction_cost": direction_cost,
+-            "collision": collision_reward,
+-            "success": success_reward,
+-            "timeout": timeout_reward,
++        components = {
++            "progress": progress,
++            "dist_penalty": dist_penalty,
++            "time": -cfg["time_penalty"],
++            # "direction_progress": direction_progress,
++            # "direction_cost": direction_cost,
++            "collision": collision_reward,
++            "success": success_reward,
++            "timeout": timeout_reward,
++        }
++        return reward, components
++
++    # 以下方向门控与奖励方法保持注释，不参与当前点任务。
++    # def _direction_gate(self, dist):
++    #     """Continuous ramp: zero outside 20 cm, full importance inside 5 cm."""
++    #     if dist is None:
++    #         return 0.0
++    #     outer = self.reward_cfg["direction_gate_distance"]
++    #     width = self.reward_cfg["direction_gate_width"]
++    #     return float(np.clip((outer - float(dist)) / width, 0.0, 1.0))
++
++    # def _compute_direction_progress(
++    #     self, prev_angle, direction_angle, prev_dist, dist,
++    # ):
++    #     """Difference of gated angular error, used with position progress.
++
++    #     Combined error is 50*d + 6*gate(d)*angle/pi. The gate's maximum
++    #     distance slope is 1/0.15, so 6/0.15 < 50: distance-only retreat cannot
++    #     yield positive TOTAL progress, even when the tool points opposite.
++    #     Closed-loop progress sums to zero before discounting; this heuristic
++    #     does not claim policy invariance under PPO's discount factor.
++    #     """
++    #     if (
++    #         not self.require_direction
++    #         or prev_angle is None
++    #         or direction_angle is None
++    #         or prev_dist is None
++    #         or dist is None
++    #     ):
++    #         return 0.0
++    #     previous_error = (
++    #         self._direction_gate(prev_dist) * float(prev_angle) / math.pi
++    #     )
++    #     current_error = (
++    #         self._direction_gate(dist) * float(direction_angle) / math.pi
++    #     )
++    #     return self.reward_cfg["direction_progress_scale"] * (
++    #         previous_error - current_error
++    #     )
++
++    # ==================== 4. 碰撞判定 ====================
++
++    def _check_collision(self, *, data=None):
++        """Apply the same collision rules to live or IK-probe data."""
++        data = self.data if data is None else data
++        mj.mj_forward(self.model, data)
++        for i in range(data.ncon):
++            contact = data.contact[i]
++            if self._contact_pair_is_collision(contact.geom1, contact.geom2):
++                return True
++        return False
++
++    def _contact_pair_is_collision(self, geom1, geom2):
++        """Classify table contact or contact between two RM75 geoms."""
++        geom1 = int(geom1)
++        geom2 = int(geom2)
++        geom1_is_table = geom1 in self.table_geom_ids
++        geom2_is_table = geom2 in self.table_geom_ids
++        if geom1_is_table or geom2_is_table:
++            return not (geom1_is_table and geom2_is_table)
++
++        geom1_is_floor = geom1 == self.floor_geom_id
++        geom2_is_floor = geom2 == self.floor_geom_id
++        if geom1_is_floor or geom2_is_floor:
++            other_geom = geom2 if geom1_is_floor else geom1
++            return (
++                other_geom in self.robot_geom_ids
++                and other_geom not in self.base_geom_ids
++            )
++
++        if (
++            geom1 in self.robot_geom_ids
++            and geom2 in self.robot_geom_ids
++        ):
++            pair = frozenset((geom1, geom2))
++            return pair not in self.allowed_adjacent_robot_geom_pairs
++        return False
++
++    # ==================== 5. 模型构建与场景 ====================
++
++    def _build_scene_and_model(self):
++        # Copy base_mjcf and construct the world
++        scene = copy.deepcopy(self.base_mjcf)
++        world = scene.worldbody
++
++        ee_site = scene.find("site", "ee_site")
++        if ee_site is None:
++            raise RuntimeError(
++                "RM75 model must define site 'ee_site' on link_7"
++            )
++        self.ee_site_name = "ee_site"
++
++
++        # Fixed tables (large boxes): use half-size
++        table_size = np.array([0.8 / 2, 1.2 / 2, 0.1405 / 2])  # half-extent (x,y,z) = (1.0, 1.5, 0.1)m
++        table_h = 0.0
++        table_xy = np.array([0.3 + 0.8 / 2, 0.1405 / 2])
++
++        table_names = ["table_1", "table_2"]
++        table_centers = [
++            np.array([table_xy[0], table_xy[1], table_h + table_size[2]], dtype=np.float64),
++            np.array([-table_xy[0], table_xy[1], table_h + table_size[2]], dtype=np.float64),
++        ]
++        for name, center in zip(table_names, table_centers):
++            world.add(
++                "geom",
++                name=name,
++                type="box",
++                size=table_size,
++                pos=center.tolist(),
++                rgba=[0.6, 0.4, 0.3, 1.0],
++                # reset(seed=...) replaces the sliding coefficient without
++                # recompiling the fixed scene topology.
++                friction=[0.6, 0.005, 0.0001]
++            )
++
++        self.table_names = table_names
++        self.active_table = None
++
++        # Sites to visualize start/goal positions (start: red, goal: green)
++        world.add("site", name="start_site", size=[0.012], rgba=[1.0, 0.2, 0.2, 0.9], pos=[0,0,1])
++        world.add("site", name="goal_site",  size=[0.012], rgba=[0.2, 1.0, 0.2, 0.9], pos=[0,0,1])
++        # # A green cylinder above the goal shows the required world -Z
++        # # approach direction. It is hidden for the legacy point-only task.
++        # world.add(
++        #     "site",
++        #     name="goal_direction_site",
++        #     type="cylinder",
++        #     size=[0.004, 0.08],
++        #     pos=[0, 0, 1],
++        #     quat=[0, 1, 0, 0],
++        #     rgba=[0.1, 0.9, 0.2, 0.85],
++        # )
++
++        # Compile model
++        xml = scene.to_xml_string()
++        assets = scene.get_assets()
++        self.model = mj.MjModel.from_xml_string(xml, assets=assets)
++        self.data = mj.MjData(self.model)
++
++        expected_joints = [f"joint_{i}" for i in range(1, 8)]
++        actual_joints = [
++            mj.mj_id2name(
++                self.model,
++                mj.mjtObj.mjOBJ_JOINT,
++                i,
++            )
++            for i in range(self.model.njnt)
++        ]
++        if actual_joints != expected_joints:
++            raise RuntimeError(
++                f"Unexpected RM75 joint order: {actual_joints}"
++            )
++
++        expected_actuators = [
++            f"joint_{i}_pos"
++            for i in range(1, 8)
++        ]
++        actual_actuators = [
++            mj.mj_id2name(
++                self.model,
++                mj.mjtObj.mjOBJ_ACTUATOR,
++                i,
++            )
++            for i in range(self.model.nu)
++        ]
++        if actual_actuators != expected_actuators:
++            raise RuntimeError(
++                f"Unexpected RM75 actuator order: {actual_actuators}"
++            )
++
++        actuator_joints = [
++            mj.mj_id2name(
++                self.model,
++                mj.mjtObj.mjOBJ_JOINT,
++                int(joint_id),
++            )
++            for joint_id in self.model.actuator_trnid[:, 0]
++        ]
++        if actuator_joints != expected_joints:
++            raise RuntimeError(
++                "RM75 actuator-to-joint mapping is incorrect: "
++                f"{actuator_joints}"
++            )
++
++        # name → id caches
++        self.geom_name2id = {mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_GEOM, i): i
++                             for i in range(self.model.ngeom)}
++        self.site_name2id = {mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_SITE, i): i
++                             for i in range(self.model.nsite)}
++        self.ee_sid   = self.site_name2id.get(self.ee_site_name, None)
++        self.start_sid = self.site_name2id["start_site"]
++        self.goal_sid  = self.site_name2id["goal_site"]
++        # self.goal_direction_sid = self.site_name2id["goal_direction_site"]
++        # self.model.site_rgba[self.goal_direction_sid, 3] = (
++        #     0.85 if self.require_direction else 0.0
++        # )
++
++        self.table_geom_ids = {
++            self.geom_name2id[name]
++            for name in self.table_names
++        }
++        self.floor_geom_id = self.geom_name2id["floor"]
++        self.robot_geom_ids = self._find_robot_geom_ids()
++        if len(self.robot_geom_ids) != 8:
++            raise RuntimeError(
++                "Expected eight RM75 collision geoms "
++                f"(base_link plus link_1..link_7), got "
++                f"{sorted(self.robot_geom_ids)}"
++            )
++
++        # Goal IK checks must not alter the live episode state.
++        self._goal_ik_data = mj.MjData(self.model)
++        seed = np.array([
++            -0.003093, 0.447318, 0.003770, 1.458466,
++            -0.000539, 0.552761, 0.0,
++        ], dtype=np.float64)
++        self._goal_ik_seeds = np.tile(seed, (3, 1))
++        self._goal_ik_seeds[1, 0] = 2.5
++        self._goal_ik_seeds[2, 0] = -2.5
++        ranges = self.model.jnt_range[:self.nq]
++        self._goal_ik_seeds = np.clip(
++            self._goal_ik_seeds, ranges[:, 0], ranges[:, 1]
++        )
++
++        if self.debug and not self._once_logged:
++            print(f"[ENV] ee_site_name='{self.ee_site_name}', ee_sid={self.ee_sid}")
++            print(f"[ENV] joints={self.nq}, actuators={self.nu}, ctrl_mode={self.ctrl_mode}")
++            try:
++                bid = self.model.site_bodyid[self.ee_sid] if self.ee_sid is not None else -1
++                bname = mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_BODY, int(bid)) if bid >= 0 else "None"
++                loc = self.model.site_pos[self.ee_sid] if self.ee_sid is not None else None
++                print(f"[ENV] ee_site body='{bname}' (id={bid}), local pos={loc}")
++            except Exception:
++                pass
++            self._once_logged = True
++
++    def _find_robot_geom_ids(self):
++        """Return collision geom IDs for the base and seven RM75 links."""
++        link_body_ids = {
++            f"link_{index}": mj.mj_name2id(
++                self.model,
++                mj.mjtObj.mjOBJ_BODY,
++                f"link_{index}",
++            )
++            for index in range(1, 8)
++        }
++        if -1 in link_body_ids.values():
++            raise RuntimeError("RM75 link body lookup failed")
++
++        link_geom_ids = {
++            link_name: {
++                geom_id
++                for geom_id in range(self.model.ngeom)
++                if int(self.model.geom_bodyid[geom_id]) == body_id
++            }
++            for link_name, body_id in link_body_ids.items()
++        }
++        robot_geom_ids = set().union(*link_geom_ids.values())
++
++        base_mesh_id = mj.mj_name2id(
++            self.model,
++            mj.mjtObj.mjOBJ_MESH,
++            "base_link",
++        )
++        if base_mesh_id < 0:
++            raise RuntimeError("RM75 base_link mesh lookup failed")
++        base_geom_ids = {
++            geom_id
++            for geom_id in range(self.model.ngeom)
++            if (
++                int(self.model.geom_type[geom_id])
++                == int(mj.mjtGeom.mjGEOM_MESH)
++                and int(self.model.geom_dataid[geom_id]) == base_mesh_id
++            )
++        }
++        self.base_geom_ids = base_geom_ids
++        robot_geom_ids.update(base_geom_ids)
++
++        # Neighboring link meshes meet at their joint by construction. These
++        # contacts are structural, not robot self-collisions that should end an
++        # episode. Non-neighboring RM75 geom contacts remain collisions.
++        adjacent_groups = [
++            base_geom_ids,
++            *[
++                link_geom_ids[f"link_{index}"]
++                for index in range(1, 8)
++            ],
++        ]
++        self.allowed_adjacent_robot_geom_pairs = {
++            frozenset((left_geom, right_geom))
++            for left_group, right_group in zip(
++                adjacent_groups,
++                adjacent_groups[1:],
++            )
++            for left_geom in left_group
++            for right_geom in right_group
+         }
+-        return reward, components
++        return robot_geom_ids
+ 
+-    def _compute_milestone_reward(self, dist, direction_angle=None):
+-        """Direction milestones require both errors; point milestones stay V4."""
+-        if dist is None:
+-            return 0.0
++    def _randomize_table_friction(self):
++        """Apply reset-seeded table friction without rebuilding the model."""
++        table_friction = np.empty((len(self.table_names), 3), dtype=np.float64)
++        for index, name in enumerate(self.table_names):
++            table_friction[index] = [
++                self.rng.uniform(0.4, 0.9),
++                0.005,
++                0.0001,
++            ]
++            geom_id = self.geom_name2id[name]
++            self.model.geom_friction[geom_id] = table_friction[index]
++        self.table_friction = table_friction
+ 
+-        reward = 0.0
+-        if self.require_direction:
+-            if direction_angle is None:
+-                return 0.0
+-            for index, (distance, angle, bonus) in enumerate(
+-                self.reward_cfg["pose_milestones"]
+-            ):
+-                if (
+-                    dist < distance and direction_angle < angle
+-                    and index not in self._pose_milestones_claimed
+-                ):
+-                    reward += bonus
+-                    self._pose_milestones_claimed.add(index)
+-            return reward
+-
+-        if dist < 0.20 and not self._milestone_20cm_claimed:
+-            reward += self.reward_cfg["milestone_20cm_bonus"]
+-            self._milestone_20cm_claimed = True
+-        if dist < 0.10 and not self._milestone_10cm_claimed:
+-            reward += self.reward_cfg["milestone_10cm_bonus"]
+-            self._milestone_10cm_claimed = True
+-        return reward
++    # ==================== 6. 运动学与仿真控制 ====================
+ 
+     def _ee_pos(self):
+         if self.ee_sid is None:
+@@ -964,295 +1026,233 @@ class RM75P2PEnv(gym.Env):
+         mj.mj_forward(self.model, self.data)
+         return self.data.site_xpos[self.ee_sid].copy()
+ 
+-    def _ee_approach_direction(self):
+-        """Return the selected end-effector local axis in world coordinates."""
+-        mj.mj_forward(self.model, self.data)
+-        rotation = self.data.site_xmat[self.ee_sid].reshape(3, 3)
+-        axis_name = self.approach_axis
+-        sign = -1.0 if axis_name.startswith("-") else 1.0
+-        axis_name = axis_name[1:] if axis_name.startswith("-") else axis_name
+-        axis_index = {"x": 0, "y": 1, "z": 2}[axis_name]
+-        direction = sign * rotation[:, axis_index]
+-        return direction / max(float(np.linalg.norm(direction)), 1e-12)
+-
+-    def _direction_error(self):
+-        """Vector observation that distinguishes aligned and opposite axes."""
+-        return self.goal_direction - self._ee_approach_direction()
+-
+-    def _direction_angle(self):
+-        """Unsigned angle in radians between the tool and target directions."""
+-        alignment = float(np.dot(
+-            self._ee_approach_direction(),
+-            self.goal_direction,
+-        ))
+-        return float(np.arccos(np.clip(alignment, -1.0, 1.0)))
+-
+-    def _direction_gate(self, dist):
+-        """Continuous ramp: zero outside 20 cm, full importance inside 5 cm."""
+-        if dist is None:
+-            return 0.0
+-        outer = self.reward_cfg["direction_gate_distance"]
+-        width = self.reward_cfg["direction_gate_width"]
+-        return float(np.clip((outer - float(dist)) / width, 0.0, 1.0))
+-
+-    def _compute_direction_progress(
+-        self, prev_angle, direction_angle, prev_dist, dist,
+-    ):
+-        """Difference of gated angular error, used with position progress.
+-
+-        Combined error is 50*d + 6*gate(d)*angle/pi. The gate's maximum
+-        distance slope is 1/0.15, so 6/0.15 < 50: distance-only retreat cannot
+-        yield positive TOTAL progress, even when the tool points opposite.
+-        Closed-loop progress sums to zero before discounting; this heuristic
+-        does not claim policy invariance under PPO's discount factor.
+-        """
++    # 以下工具方向向量与角度方法保持注释。
++    # def _ee_approach_direction(self):
++    #     """Return the selected end-effector local axis in world coordinates."""
++    #     mj.mj_forward(self.model, self.data)
++    #     rotation = self.data.site_xmat[self.ee_sid].reshape(3, 3)
++    #     axis_name = self.approach_axis
++    #     sign = -1.0 if axis_name.startswith("-") else 1.0
++    #     axis_name = axis_name[1:] if axis_name.startswith("-") else axis_name
++    #     axis_index = {"x": 0, "y": 1, "z": 2}[axis_name]
++    #     direction = sign * rotation[:, axis_index]
++    #     return direction / max(float(np.linalg.norm(direction)), 1e-12)
++
++    # def _direction_error(self):
++    #     """Vector observation that distinguishes aligned and opposite axes."""
++    #     return self.goal_direction - self._ee_approach_direction()
++
++    # def _direction_angle(self):
++    #     """Unsigned angle in radians between the tool and target directions."""
++    #     alignment = float(np.dot(
++    #         self._ee_approach_direction(),
++    #         self.goal_direction,
++    #     ))
++    #     return float(np.arccos(np.clip(alignment, -1.0, 1.0)))
++
++    def _solve_ik(
++        self,
++        target_pos: np.ndarray,
++        initial_guess: np.ndarray,
++        *,
++        data=None,
++    ) -> np.ndarray | None:
++        """Position-only damped least squares; use supplied data when probing."""
++        data = self.data if data is None else data
++        q = np.asarray(initial_guess, dtype=np.float64).copy()
++        target_pos = np.asarray(target_pos, dtype=np.float64)
+         if (
+-            not self.require_direction
+-            or prev_angle is None
+-            or direction_angle is None
+-            or prev_dist is None
+-            or dist is None
++            q.shape != (self.nq,) or target_pos.shape != (3,)
++            or not np.all(np.isfinite(q))
++            or not np.all(np.isfinite(target_pos))
+         ):
+-            return 0.0
+-        previous_error = (
+-            self._direction_gate(prev_dist) * float(prev_angle) / math.pi
+-        )
+-        current_error = (
+-            self._direction_gate(dist) * float(direction_angle) / math.pi
+-        )
+-        return self.reward_cfg["direction_progress_scale"] * (
+-            previous_error - current_error
+-        )
+-
+-    def _get_obs(self):
+-        q = self.data.qpos[:self.nq].copy()
+-        qd = self.data.qvel[:self.nq].copy()
+-        if self.q_target is None or self.q_target.shape != (self.nq,):
+-            tracking_error = np.zeros(self.nq, dtype=np.float64)
+-        else:
+-            tracking_error = self.q_target - q
+-        ee = self._ee_pos()
+-        goal = self.goal_pos if self.goal_pos is not None else np.zeros(3)
+-        coll = float(self._check_collision())
+-        obs = np.concatenate([
+-            q,
+-            qd,
+-            tracking_error,
+-            ee.astype(np.float64),
+-            goal.astype(np.float64),
+-            np.array([coll], dtype=np.float64)
+-        ]).astype(np.float32)
+-        if self.require_direction:
+-            obs = np.concatenate([
+-                obs,
+-                self._direction_error().astype(np.float32),
+-            ]).astype(np.float32)
+-        return obs
+-
+-    def _solve_ik(self, target_pos: np.ndarray, initial_guess: np.ndarray) -> np.ndarray | None:
+-        """Simple IK solver using damped least squares.
+-        Returns joint configuration or None if failed.
+-        """
+-        q = initial_guess.copy()
+-        target_pos = np.asarray(target_pos, dtype=np.float64)
++            return None
+ 
++        ranges = self.model.jnt_range[:self.nq]
++        q = np.clip(q, ranges[:, 0], ranges[:, 1])
+         jacp = np.zeros((3, self.model.nv))
+         jacr = np.zeros((3, self.model.nv))
+         damping = 1e-3
+         lamI3 = (damping ** 2) * np.eye(3)
+ 
+-        jrange = self.model.jnt_range[:self.nq]
+-
+-        for it in range(500):  # max iterations
+-            self.data.qpos[:self.nq] = q
+-            self.data.qvel[:] = 0.0
+-            mj.mj_forward(self.model, self.data)
+-
+-            ee_pos = self.data.site_xpos[self.ee_sid].copy()
+-            e_pos = target_pos - ee_pos
+-
++        for _ in range(500):
++            data.qpos[:self.nq] = q
++            data.qvel[:] = 0.0
++            mj.mj_forward(self.model, data)
++            e_pos = target_pos - data.site_xpos[self.ee_sid]
+             if np.linalg.norm(e_pos) < self.ik_tolerance:
+                 return q
+ 
+-            mj.mj_jacSite(self.model, self.data, jacp, jacr, self.ee_sid)
++            mj.mj_jacSite(self.model, data, jacp, jacr, self.ee_sid)
+             Jp = jacp[:, :self.nq]
+-
+             dq = Jp.T @ np.linalg.solve(Jp @ Jp.T + lamI3, e_pos)
+-            dq = np.clip(dq, -0.2, 0.2)
+-
+-            q = q + 0.2 * dq
+-            # Clip to joint limits
+-            for j in range(self.nq):
+-                lo, hi = jrange[j]
+-                if np.isfinite(lo) and np.isfinite(hi):
+-                    q[j] = np.clip(q[j], lo, hi)
+-
+-        # Failed to converge
+-        return None
+-
+-    @staticmethod
+-    def _axis_alignment_rotvec(current, target):
+-        """Shortest rotation vector that aligns one unit axis with another."""
+-        current = np.asarray(current, dtype=np.float64)
+-        target = np.asarray(target, dtype=np.float64)
+-        cross = np.cross(current, target)
+-        sin_angle = float(np.linalg.norm(cross))
+-        cos_angle = float(np.clip(np.dot(current, target), -1.0, 1.0))
+-        if sin_angle > 1e-9:
+-            return cross * (math.atan2(sin_angle, cos_angle) / sin_angle)
+-        if cos_angle > 0.0:
+-            return np.zeros(3, dtype=np.float64)
+-        basis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+-        if abs(float(np.dot(current, basis))) > 0.9:
+-            basis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+-        axis = np.cross(current, basis)
+-        axis /= np.linalg.norm(axis)
+-        return math.pi * axis
+-
+-    def solve_direction_ik(self, target_pos, initial_guess):
+-        """Diagnostic IK for position plus tool-axis direction, with yaw free."""
+-        q = np.asarray(initial_guess, dtype=np.float64).copy()
+-        target_pos = np.asarray(target_pos, dtype=np.float64)
+-        jacp = np.zeros((3, self.model.nv), dtype=np.float64)
+-        jacr = np.zeros((3, self.model.nv), dtype=np.float64)
+-        joint_ranges = self.model.jnt_range[:self.nq]
+-        damping = 1e-3
+-        direction_weight = 0.20
+-
+-        for _ in range(500):
+-            self.data.qpos[:self.nq] = q
+-            self.data.qvel[:] = 0.0
+-            mj.mj_forward(self.model, self.data)
+-            position_error = target_pos - self.data.site_xpos[self.ee_sid]
+-            current_direction = self._ee_approach_direction()
+-            rotation_error = self._axis_alignment_rotvec(
+-                current_direction,
+-                self.goal_direction,
++            if not np.all(np.isfinite(dq)):
++                return None
++            q = np.clip(
++                q + 0.2 * np.clip(dq, -0.2, 0.2),
++                ranges[:, 0], ranges[:, 1],
+             )
+-            direction_angle = float(np.linalg.norm(rotation_error))
+-            if (
+-                np.linalg.norm(position_error) < 0.01
+-                and direction_angle
+-                < self.reward_cfg["direction_success_thresh"]
+-            ):
+-                return None if self._check_collision() else q
+-
+-            mj.mj_jacSite(self.model, self.data, jacp, jacr, self.ee_sid)
+-            jacobian = np.vstack([
+-                jacp[:, :self.nq],
+-                direction_weight * jacr[:, :self.nq],
+-            ])
+-            error = np.concatenate([
+-                position_error,
+-                direction_weight * rotation_error,
+-            ])
+-            system = jacobian @ jacobian.T
+-            dq = jacobian.T @ np.linalg.solve(
+-                system + (damping ** 2) * np.eye(6),
+-                error,
+-            )
+-            q += 0.2 * np.clip(dq, -0.2, 0.2)
+-            for joint_index, (lower, upper) in enumerate(joint_ranges):
+-                if np.isfinite(lower) and np.isfinite(upper):
+-                    q[joint_index] = np.clip(q[joint_index], lower, upper)
+         return None
+ 
+-    def _contact_pair_is_collision(self, geom1, geom2):
+-        """Classify table contact or contact between two RM75 geoms."""
+-        geom1 = int(geom1)
+-        geom2 = int(geom2)
+-        geom1_is_table = geom1 in self.table_geom_ids
+-        geom2_is_table = geom2 in self.table_geom_ids
+-        if geom1_is_table or geom2_is_table:
+-            return not (geom1_is_table and geom2_is_table)
+-
+-        geom1_is_floor = geom1 == self.floor_geom_id
+-        geom2_is_floor = geom2 == self.floor_geom_id
+-        if geom1_is_floor or geom2_is_floor:
+-            other_geom = geom2 if geom1_is_floor else geom1
+-            return (
+-                other_geom in self.robot_geom_ids
+-                and other_geom not in self.base_geom_ids
+-            )
+-
+-        if (
+-            geom1 in self.robot_geom_ids
+-            and geom2 in self.robot_geom_ids
+-        ):
+-            pair = frozenset((geom1, geom2))
+-            return pair not in self.allowed_adjacent_robot_geom_pairs
+-        return False
+-
+-    def _check_collision(self):
+-        mj.mj_forward(self.model, self.data)
+-        for i in range(self.data.ncon):
+-            c = self.data.contact[i]
+-            if self._contact_pair_is_collision(c.geom1, c.geom2):
+-                return True
+-        return False
++    # 以下工具轴旋转与方向IK方法保持注释。
++    # @staticmethod
++    # def _axis_alignment_rotvec(current, target):
++    #     """Shortest rotation vector that aligns one unit axis with another."""
++    #     current = np.asarray(current, dtype=np.float64)
++    #     target = np.asarray(target, dtype=np.float64)
++    #     cross = np.cross(current, target)
++    #     sin_angle = float(np.linalg.norm(cross))
++    #     cos_angle = float(np.clip(np.dot(current, target), -1.0, 1.0))
++    #     if sin_angle > 1e-9:
++    #         return cross * (math.atan2(sin_angle, cos_angle) / sin_angle)
++    #     if cos_angle > 0.0:
++    #         return np.zeros(3, dtype=np.float64)
++    #     basis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
++    #     if abs(float(np.dot(current, basis))) > 0.9:
++    #         basis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
++    #     axis = np.cross(current, basis)
++    #     axis /= np.linalg.norm(axis)
++    #     return math.pi * axis
++
++    # def solve_direction_ik(self, target_pos, initial_guess):
++    #     """Diagnostic IK for position plus tool-axis direction, with yaw free."""
++    #     q = np.asarray(initial_guess, dtype=np.float64).copy()
++    #     target_pos = np.asarray(target_pos, dtype=np.float64)
++    #     jacp = np.zeros((3, self.model.nv), dtype=np.float64)
++    #     jacr = np.zeros((3, self.model.nv), dtype=np.float64)
++    #     joint_ranges = self.model.jnt_range[:self.nq]
++    #     damping = 1e-3
++    #     direction_weight = 0.20
++
++    #     for _ in range(500):
++    #         self.data.qpos[:self.nq] = q
++    #         self.data.qvel[:] = 0.0
++    #         mj.mj_forward(self.model, self.data)
++    #         position_error = target_pos - self.data.site_xpos[self.ee_sid]
++    #         current_direction = self._ee_approach_direction()
++    #         rotation_error = self._axis_alignment_rotvec(
++    #             current_direction,
++    #             self.goal_direction,
++    #         )
++    #         direction_angle = float(np.linalg.norm(rotation_error))
++    #         if (
++    #             np.linalg.norm(position_error) < 0.01
++    #             and direction_angle
++    #             < self.reward_cfg["direction_success_thresh"]
++    #         ):
++    #             return None if self._check_collision() else q
++
++    #         mj.mj_jacSite(self.model, self.data, jacp, jacr, self.ee_sid)
++    #         jacobian = np.vstack([
++    #             jacp[:, :self.nq],
++    #             direction_weight * jacr[:, :self.nq],
++    #         ])
++    #         error = np.concatenate([
++    #             position_error,
++    #             direction_weight * rotation_error,
++    #         ])
++    #         system = jacobian @ jacobian.T
++    #         dq = jacobian.T @ np.linalg.solve(
++    #             system + (damping ** 2) * np.eye(6),
++    #             error,
++    #         )
++    #         q += 0.2 * np.clip(dq, -0.2, 0.2)
++    #         for joint_index, (lower, upper) in enumerate(joint_ranges):
++    #             if np.isfinite(lower) and np.isfinite(upper):
++    #                 q[joint_index] = np.clip(q[joint_index], lower, upper)
++    #     return None
+ 
+-    def render(self):
+-        if self.render_mode == "rgb_array":
+-            # Off-screen rendering for video recording
+-            if not hasattr(self, "_offscreen_renderer"):
+-                from mujoco import Renderer
+-                # HD resolution: 1280x720 (instead of 640x480)
+-                self._offscreen_renderer = Renderer(self.model, height=480, width=1280)
++    def _pd_to_ctrl(self, q_des):
++        """Send desired joint angles to the seven position actuators."""
++        self.data.ctrl[:self.nu] = q_des[:self.nu]
+ 
+-            self._update_visualization_sites()
++    def _step_sim(self, n=1, hold_target=True):
++        for _ in range(n):
++            if hold_target and self.q_target is not None:
++                self._pd_to_ctrl(self.q_target)
++            mj.mj_step(self.model, self.data)
+ 
+-            # Forward kinematics to update visualization
+-            mj.mj_forward(self.model, self.data)
++    # ==================== 7. 可视化辅助与手动交互 ====================
+ 
+-            # Render and return RGB array
+-            self._offscreen_renderer.update_scene(self.data)
+-            return self._offscreen_renderer.render()
++    def _update_visualization_sites(self):
++        """更新起点和目标点；方向线更新暂时注释。"""
++        if self.start_pos is not None:
++            self.model.site_pos[self.start_sid] = self.start_pos
++        if self.goal_pos is None:
++            return
++        self.model.site_pos[self.goal_sid] = self.goal_pos
++        # # The 16 cm cylinder is centered 8 cm opposite the direction vector,
++        # # so it terminates at the green target point for the default world -Z
++        # # approach direction.
++        # self.model.site_pos[self.goal_direction_sid] = (
++        #     self.goal_pos - 0.08 * self.goal_direction
++        # )
+ 
+-        elif self.render_mode == "human":
+-            if getattr(self, "viewer_failed", False):
+-                return
+-            if self.viewer is None:
+-                # 1) Try MuJoCo built-in viewer first
+-                try:
+-                    import mujoco.viewer as mjv
+-                    self.viewer = mjv.launch_passive(self.model, self.data)
+-                    self._viewer_builtin = True
+-                except Exception:
+-                    # 2) Fallback to mujoco-python-viewer
+-                    try:
+-                        import mujoco_viewer
+-                        self.viewer = mujoco_viewer.MujocoViewer(self.model, self.data)
+-                        self._viewer_builtin = False
+-                    except Exception as e:
+-                        if not self.viewer_failed:
+-                            print("Viewer unavailable (will not retry):", e)
+-                        self.viewer_failed = True
+-                        return
+-            # Draw a frame
++    def interactive_viewer(self):
++        """Open the built-in MuJoCo viewer and block until the window closes.
++        Tip: Use the right panel -> Actuation/Controls sliders to move joints.
++        """
++        try:
++            import mujoco.viewer as mjv
++            # On macOS, the built-in viewer requires running under 'mjpython'
++            if sys.platform == "darwin" and not os.path.basename(sys.executable).startswith("mjpython"):
++                print("Tip: On macOS, run with 'mjpython env.py --interactive' for the built-in viewer.")
++                return self._fallback_interactive_viewer()
++        except Exception as e:
++            print("Built-in viewer unavailable:", e)
++            # Fallback to non-blocking path
++            self.render_mode = "human"
++            self.render()
++            print("Fallback viewer started (non-blocking). Close the window or Ctrl+C to exit.")
+             try:
+-                if self._viewer_builtin:
+-                    if hasattr(self.viewer, "is_running") and not self.viewer.is_running():
+-                        self.viewer_failed = True
+-                        return
+-                    self.viewer.sync()
+-                else:
+-                    self.viewer.render()
+-            except Exception:
+-                self.viewer_failed = True
++                while True:
++                    time.sleep(0.1)
++            except KeyboardInterrupt:
+                 return
+ 
+-    def close(self):
+-        if self.viewer is not None:
+-            try:
+-                if hasattr(self.viewer, "close"):
+-                    self.viewer.close()
+-            except Exception:
+-                pass
+-            self.viewer = None
++        # Ensure model/data exist
++        if self.model is None or self.data is None:
++            self._build_scene_and_model()
++            mj.mj_forward(self.model, self.data)
+ 
+-        # Clean up offscreen renderer if it exists
+-        if hasattr(self, "_offscreen_renderer"):
++        print("[Interactive] Use the right panel's Actuation sliders to move joints. Close the window to exit.")
++        q_hold = self.data.qpos[:self.nq].copy()
++        try:
++            with mjv.launch_passive(self.model, self.data) as viewer:
++                while viewer.is_running():
++                    self._update_visualization_sites()
++                    self._pd_to_ctrl(q_hold)
++                    mj.mj_step(self.model, self.data)
++                    viewer.sync()
++        except RuntimeError as e:
++            print("Built-in viewer couldn't start:", e)
++            return self._fallback_interactive_viewer()
++
++    def _fallback_interactive_viewer(self):
++        """Fallback loop using mujoco-python-viewer (GLFW)."""
++        try:
++            import mujoco_viewer
++        except Exception as e:
++            print("Fallback viewer unavailable:", e)
++            print("Hint: fix ~/.config/mujoco_viewer permissions or install mujoco-python-viewer:")
++            print("  pip install mujoco-python-viewer glfw")
++            return
++        viewer = None
++        try:
++            viewer = mujoco_viewer.MujocoViewer(self.model, self.data)
++            print("[Interactive] Fallback viewer active. Press Ctrl+C to exit.")
++            while True:
++                self._update_visualization_sites()
++                self._pd_to_ctrl(self.data.qpos[:self.nq])
++                mj.mj_step(self.model, self.data)
++                viewer.render()
++        except KeyboardInterrupt:
++            pass
++        except Exception as e:
++            print("Fallback viewer closed:", e)
++        finally:
+             try:
+-                self._offscreen_renderer.close()
++                if viewer is not None:
++                    viewer.close()
+             except Exception:
+                 pass
+diff --git a/wandb/latest-run b/wandb/latest-run
+index 97c40a1..571a4e8 120000
+--- a/wandb/latest-run
++++ b/wandb/latest-run
+@@ -1 +1 @@
+-run-20261013_133756-qsg0yrfd
+\ No newline at end of file
++run-20261019_103048-z5uan3z9
+\ No newline at end of file

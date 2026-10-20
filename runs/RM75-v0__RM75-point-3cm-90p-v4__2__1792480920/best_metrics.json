@@ -1,0 +1,14 @@
+{
+  "collision_rate": 0.0,
+  "entered_5cm_rate": 0.96,
+  "global_step": 0,
+  "mean_episode_length": 470.17,
+  "mean_final_direction_angle_deg": 0.0,
+  "mean_final_distance": 0.058849697890771074,
+  "mean_min_distance": 0.032256489278049985,
+  "meets_acceptance": false,
+  "near_failure_rate": 0.17,
+  "never_entered_5cm_rate": 0.04,
+  "position_success_rate": 0.79,
+  "success_rate": 0.79
+}

@@ -18,6 +18,8 @@ Examples:
 
 from __future__ import annotations
 
+# ==================== 1. 依赖导入与全局配置 ====================
+
 import argparse
 import sys
 import time
@@ -25,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
+import gymnasium as gym
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -38,9 +40,110 @@ from env_rm75 import RM75P2PEnv
 
 SUPPORTED_MODEL_ENVS = {
     (19, 6): "UR5-v0",
+    (21, 7): "RM75-v0",
     (28, 7): "RM75-v0",
     (31, 7): "RM75Direction-v0",
 }
+
+
+# ==================== 2. 命令行参数与输入检查 ====================
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Visualize or batch-evaluate a trained UR5 or RM75 random-point "
+            "reaching policy."
+        )
+    )
+    parser.add_argument(
+        "--env-id",
+        choices=("auto", "UR5-v0", "RM75-v0", "RM75Direction-v0"),
+        default="auto",
+        help=(
+            "Evaluation environment. The default infers it from the saved "
+            "observation/action dimensions."
+        ),
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help=(
+            "Path to a .cleanrl_model file. When omitted, the newest model "
+            "under runs/ is used."
+        ),
+    )
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        default=5,
+        help="Number of episodes to run.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="First evaluation seed; each episode adds one.",
+    )
+    parser.add_argument(
+        "--target-mode",
+        choices=("random", "fixed"),
+        default="random",
+        help="How evaluation goals are selected.",
+    )
+    parser.add_argument(
+        "--target-pos",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Fixed target position; requires --target-mode fixed.",
+    )
+    parser.add_argument(
+        "--dist-success-thresh",
+        type=float,
+        default=0.05,
+        help="Success distance threshold for RM75 point-reaching.",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Disable the viewer and run a faster statistical evaluation.",
+    )
+    parser.add_argument(
+        "--stochastic",
+        action="store_true",
+        help=(
+            "Sample from the training-time action distribution. The default "
+            "uses deterministic mean actions."
+        ),
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=100,
+        help="Print distance every N steps; use 0 to disable.",
+    )
+    parser.add_argument(
+        "--realtime",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Pace rendered episodes at simulated real time.",
+    )
+
+    args = parser.parse_args()
+    if not np.isfinite(args.dist_success_thresh) or args.dist_success_thresh <= 0.0:
+        parser.error("--dist-success-thresh must be finite and positive")
+    if args.episodes <= 0:
+        parser.error("--episodes must be greater than zero")
+    if args.progress_every < 0:
+        parser.error("--progress-every must be non-negative")
+    if args.target_mode == "fixed" and args.target_pos is None:
+        parser.error("--target-mode fixed requires --target-pos X Y Z")
+    return args
+
+
+# ==================== 3. 模型路径、权重读取与维度识别 ====================
 
 def latest_model_path() -> Path:
     """Return the most recently modified saved PPO model."""
@@ -115,32 +218,85 @@ def infer_environment_id(state: dict[str, torch.Tensor]) -> str:
         raise ValueError(
             "Unsupported model dimensions: "
             f"{dimensions[0]} observations and {dimensions[1]} actions. "
-            "Supported models are UR5-v0 (19/6), RM75-v0 (28/7), "
-            "and RM75Direction-v0 (31/7)."
+            "Supported models are UR5-v0 (19/6) and RM75-v0 (21/7 or legacy 28/7). "
+            "Direction models use RM75Direction-v0 (31/7)."
         ) from exc
 
 
-def create_environment(env_id: str, args, render_mode):
-    """Construct the selected point-reaching environment."""
+# ==================== 4. 环境构建与历史28维观测兼容 ====================
+
+class LegacyRM75ObservationEnv(RM75P2PEnv):
+    """仅供可视化：恢复历史点任务的28维观测。"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(3 * self.nq + 3 + 3 + 1,),
+            dtype=np.float32,
+        )
+
+    def _get_obs(self):
+        observation = super()._get_obs()
+
+        if self.q_target is None:
+            tracking_error = np.zeros(
+                self.nq,
+                dtype=np.float64,
+            )
+        else:
+            tracking_error = (
+                self.q_target - self.data.qpos[:self.nq]
+            )
+
+        # 当前21维：q、qd、TCP位置、目标位置、碰撞。
+        # 历史28维：在qd之后插入7维真实追踪误差。
+        split = 2 * self.nq
+        return np.concatenate(
+            [
+                observation[:split],
+                tracking_error,
+                observation[split:],
+            ]
+        ).astype(np.float32)
+
+
+def create_environment(
+    env_id: str,
+    args,
+    render_mode,
+    observation_dim: int,
+):
+    """Construct the point or direction environment matching saved inputs."""
     kwargs = {
         "render_mode": render_mode,
         "seed": args.seed,
         "target_mode": args.target_mode,
-        "target_pos": (
-            tuple(args.target_pos)
-            if args.target_pos is not None
-            else None
-        ),
+        "target_pos": tuple(args.target_pos) if args.target_pos is not None else None,
     }
     if env_id == "UR5-v0":
         return UR5P2PEnv(**kwargs)
-    if env_id in {"RM75-v0", "RM75Direction-v0"}:
+    if env_id == "RM75Direction-v0":
+        if observation_dim != 31:
+            raise ValueError("RM75Direction-v0 requires 31 observations")
         return RM75P2PEnv(
             **kwargs,
-            require_direction=(env_id == "RM75Direction-v0"),
+            require_direction=True,
+            dist_success_thresh=args.dist_success_thresh,
         )
+    if env_id == "RM75-v0":
+        if observation_dim == 28:
+            env_class = LegacyRM75ObservationEnv
+        elif observation_dim == 21:
+            env_class = RM75P2PEnv
+        else:
+            raise ValueError("RM75-v0 requires 21 or 28 observations")
+        return env_class(**kwargs, dist_success_thresh=args.dist_success_thresh)
     raise ValueError(f"Unsupported environment: {env_id}")
 
+
+# ==================== 5. 策略网络加载与动作推理 ====================
 
 def load_agent(state: dict[str, torch.Tensor], env, env_id: str) -> Agent:
     """Create a V4 Agent and reject model/environment mismatches clearly."""
@@ -181,121 +337,65 @@ def select_action(
     return action[0].cpu().numpy()
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Visualize or batch-evaluate a trained UR5 or RM75 random-point "
-            "reaching policy."
-        )
-    )
-    parser.add_argument(
-        "--env-id",
-        choices=("auto", "UR5-v0", "RM75-v0", "RM75Direction-v0"),
-        default="auto",
-        help=(
-            "Evaluation environment. The default infers it from the saved "
-            "observation/action dimensions."
-        ),
-    )
-    parser.add_argument(
-        "--model-path",
-        type=str,
-        default=None,
-        help=(
-            "Path to a .cleanrl_model file. When omitted, the newest model "
-            "under runs/ is used."
-        ),
-    )
-    parser.add_argument(
-        "--episodes",
-        type=int,
-        default=5,
-        help="Number of episodes to run.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="First evaluation seed; each episode adds one.",
-    )
-    parser.add_argument(
-        "--target-mode",
-        choices=("random", "fixed"),
-        default="random",
-        help="How evaluation goals are selected.",
-    )
-    parser.add_argument(
-        "--target-pos",
-        type=float,
-        nargs=3,
-        default=None,
-        metavar=("X", "Y", "Z"),
-        help="Fixed target position; requires --target-mode fixed.",
-    )
-    parser.add_argument(
-        "--headless",
-        action="store_true",
-        help="Disable the viewer and run a faster statistical evaluation.",
-    )
-    parser.add_argument(
-        "--stochastic",
-        action="store_true",
-        help=(
-            "Sample from the training-time action distribution. The default "
-            "uses deterministic mean actions."
-        ),
-    )
-    parser.add_argument(
-        "--progress-every",
-        type=int,
-        default=100,
-        help="Print distance every N steps; use 0 to disable.",
-    )
-    parser.add_argument(
-        "--realtime",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Pace rendered episodes at simulated real time.",
-    )
-    args = parser.parse_args()
-
-    if args.episodes <= 0:
-        parser.error("--episodes must be greater than zero")
-    if args.progress_every < 0:
-        parser.error("--progress-every must be non-negative")
-    if args.target_mode == "fixed" and args.target_pos is None:
-        parser.error("--target-mode fixed requires --target-pos X Y Z")
-    return args
-
+# ==================== 6. 评估主流程与结果统计 ====================
 
 def main() -> None:
+    # ---------- 6.1 参数解析、模型加载与环境初始化 ----------
     args = parse_args()
     model_path = resolve_model_path(args.model_path)
     state = load_model_state(model_path)
+    observation_dim, action_dim = model_dimensions(state)
+
     env_id = (
         infer_environment_id(state)
         if args.env_id == "auto"
         else args.env_id
     )
+
     render_mode = None if args.headless else "human"
-    env = create_environment(env_id, args, render_mode)
+    env = create_environment(
+        env_id,
+        args,
+        render_mode,
+        observation_dim=observation_dim,
+    )
     agent = load_agent(state, env, env_id)
 
-    action_mode = "stochastic" if args.stochastic else "deterministic"
+    action_mode = (
+        "stochastic"
+        if args.stochastic
+        else "deterministic"
+    )
     print(f"Model: {model_path}")
     print(f"Environment: {env_id}")
+    print(f"Observation dimensions: {observation_dim}")
+    print(f"Action dimensions: {action_dim}")
     print(f"Action mode: {action_mode}")
     print(f"Target mode: {args.target_mode}")
+
+    if env_id in {"RM75-v0", "RM75Direction-v0"}:
+        print(
+            "Success distance threshold: "
+            f"{env.reward_cfg['dist_success_thresh']:.3f} m"
+        )
+        if observation_dim == 28:
+            print(
+                "Legacy 28-D observation compatibility enabled. "
+                "Physics and reset logic use the current environment."
+            )
 
     results: list[dict[str, float | int | bool | str]] = []
     simulation_step_seconds = float(
         env.model.opt.timestep * env.substeps
     )
 
+    # ---------- 6.2 回合重置、策略执行与实时诊断 ----------
     try:
         for episode in range(args.episodes):
             observation, _ = env.reset(seed=args.seed + episode)
             initial_distance = float(env.prev_dist)
+            min_distance = initial_distance
+            previous_tcp = env.data.site_xpos[env.ee_sid].copy()
             total_reward = 0.0
             info: dict = {}
 
@@ -313,21 +413,55 @@ def main() -> None:
                     observation,
                     stochastic=args.stochastic,
                 )
+                previous_q = env.data.qpos[:env.nq].copy()
+                previous_q_ref = env.q_target[:env.nq].copy()
                 observation, reward, terminated, truncated, info = (
                     env.step(action)
                 )
+
+                min_distance = min(min_distance, float(info["dist"]))
+                reference_delta = (
+                    env.q_target[:env.nq] - previous_q_ref
+                )
+                joint_delta = (
+                    env.data.qpos[:env.nq] - previous_q
+                )
+                current_tcp = env.data.site_xpos[env.ee_sid].copy()
+                tcp_speed = float(
+                    np.linalg.norm(current_tcp - previous_tcp)
+                    / simulation_step_seconds
+                )
+                previous_tcp = current_tcp
                 total_reward += float(reward)
 
                 if (
-                    not args.headless
-                    and args.progress_every
+                    args.progress_every
                     and step % args.progress_every == 0
                 ):
+                    q = env.data.qpos[:env.nq]
+                    q_ref = env.q_target[:env.nq]
+                    tracking_error = float(np.max(np.abs(q_ref - q)))
+                    lag_joint = int(np.argmax(np.abs(q_ref - q)))
+
+                    joint_ranges = env.model.jnt_range[:env.nq]
+                    limited = env.model.jnt_limited[:env.nq].astype(bool)
+                    near_limit = np.flatnonzero(
+                        limited & (
+                            (np.abs(q_ref - joint_ranges[:, 0]) < 0.01)
+                            | (np.abs(q_ref - joint_ranges[:, 1]) < 0.01)
+                        )
+                    ) + 1
+
                     print(
                         f"  step={step}, dist={float(info['dist']):.4f}, "
-                        f"direction_deg="
-                        f"{float(info.get('direction_angle_deg') or 0.0):.2f}, "
-                        f"reward={float(reward):.3f}"
+                        f"reward={float(reward):.3f}, "
+                        f"tcp_speed={tcp_speed:.4f}m/s, "
+                        f"track_err={tracking_error:.4f}rad, "
+                        f"dqref_max={np.max(np.abs(reference_delta)):.4f}rad, "
+                        f"lag_joint={lag_joint + 1}, "
+                        f"dqref_j={reference_delta[lag_joint]:+.4f}rad, "
+                        f"dq_j={joint_delta[lag_joint]:+.4f}rad, "
+                        f"qref_limits={near_limit.tolist()}"
                     )
 
                 if not args.headless and args.realtime:
@@ -337,6 +471,7 @@ def main() -> None:
                 if terminated or truncated:
                     break
 
+            # ---------- 6.3 单回合结果记录与打印 ----------
             success = bool(info.get("success", False))
             collision = bool(info.get("collision", False))
             timeout = not success and not collision
@@ -363,6 +498,7 @@ def main() -> None:
                     "steps": step,
                     "initial_distance": initial_distance,
                     "final_distance": final_distance,
+                    "min_distance": min_distance,
                     "final_direction_angle_deg": final_direction_angle,
                     "position_success": bool(
                         info.get(
@@ -380,13 +516,19 @@ def main() -> None:
             )
             print(
                 f"Episode {episode + 1:03d}: {reason:9s} | "
+                f"seed={args.seed + episode} | "
+                f"goal={np.round(env.goal_pos, 4)} | "
                 f"steps={step:4d} | final_dist={final_distance:.4f} | "
+                f"min_dist={min_distance:.4f} | "
+                f"entered_5cm={min_distance < 0.05} | "
                 f"direction={final_direction_angle:6.2f} deg | "
                 f"return={total_reward:.2f}"
             )
     finally:
+        # ---------- 6.4 关闭环境与可视化资源 ----------
         env.close()
 
+    # ---------- 6.5 全部回合的汇总统计与任务说明 ----------
     success_rate = np.mean([item["success"] for item in results])
     collision_rate = np.mean([item["collision"] for item in results])
     timeout_rate = np.mean([item["timeout"] for item in results])
@@ -435,6 +577,14 @@ def main() -> None:
     if env_id == "RM75Direction-v0":
         print(f"  mean_direction_deg:   {mean_direction_angle:.2f}")
     print(f"  mean_return:          {mean_return:.2f}")
+    entered_5cm_rate = np.mean([
+        item["min_distance"] < 0.05 for item in results
+    ])
+    mean_min_distance = np.mean([
+        item["min_distance"] for item in results
+    ])
+    print(f"  entered_5cm_rate:     {entered_5cm_rate:.3f}")
+    print(f"  mean_min_distance:    {mean_min_distance:.4f}")
     if env_id == "RM75Direction-v0":
         print(
             "\nTask scope: target position plus a fixed tool-axis approach "
@@ -444,6 +594,8 @@ def main() -> None:
         print("\nTask scope: end-effector point reaching only.")
     print("Object grasping and gripper closure are not simulated.")
 
+
+# ==================== 7. 脚本入口 ====================
 
 if __name__ == "__main__":
     main()

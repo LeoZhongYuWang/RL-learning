@@ -27,7 +27,6 @@ fi
   --total-timesteps 500000 \
   --num-envs 1 \
   --learning-rate 1e-5 \
-  --target-sampling uniform \
   --collision-penalty 45 \
   --near-start-probability 0.5 \
   --initial-action-std 0.15 \

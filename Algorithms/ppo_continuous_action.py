@@ -1,4 +1,7 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
+
+# ==================== 1. 依赖导入与环境注册 ====================
+
 import json
 import os
 import random
@@ -47,6 +50,7 @@ if "RM75-v0" not in gym.registry:
         max_episode_steps=None,
     )
 
+# 方向任务：固定向下切入方向。
 if "RM75Direction-v0" not in gym.registry:
     gym.register(
         id="RM75Direction-v0",
@@ -59,8 +63,11 @@ if "RM75Direction-v0" not in gym.registry:
         max_episode_steps=None,
     )
 
+# ==================== 2. 训练参数与命令行配置 ====================
+
 @dataclass
 class Args:
+    # 2.1 实验命名、设备、日志与模型管理
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
     seed: int = 1
@@ -83,6 +90,7 @@ class Args:
     """full checkpoint used to continue an interrupted run"""
     checkpoint_interval: int = 100000
     """environment steps between atomic full checkpoints; 0 disables periodic saves"""
+    # 2.2 PPO采样、优化与探索参数
     # Algorithm specific arguments
     env_id: str = "RM75-v0"
     """the id of the environment"""
@@ -96,7 +104,7 @@ class Args:
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
-    gamma: float = 0.99
+    gamma: float = 0.995
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
@@ -125,18 +133,20 @@ class Args:
     target_kl: float = 0.02
     """the target KL divergence threshold"""
 
+    # 2.3 目标与环境参数，以及方向任务的近处起点
     target_mode: str = "random"
     """goal sampling mode passed to UR5 environment"""
     target_pos: Optional[Tuple[float, float, float]] = None
     """explicit goal position when target_mode=='fixed'"""
-    target_sampling: str = "uniform"
-    """random-goal sampler: uniform or hard_mixture"""
+    dist_success_thresh: float = 0.05
+    """RM75 point-reaching success distance in meters"""
     collision_penalty: float = 75.0
     """RM75 collision reward penalty; collision still terminates the episode"""
     near_start_probability: float = 0.0
     """direction-task fraction requesting near-goal training starts; 0 preserves full starts"""
     near_start_from: Optional[str] = None
     """frozen policy preparing arrival starts during training only; None uses IK starts"""
+    # 2.4 固定种子评估与验收参数
     eval_interval: int = 0
     """environment steps between deterministic evaluations; 0 disables them"""
     eval_episodes: int = 100
@@ -148,6 +158,7 @@ class Args:
     eval_target_success: float = 0.82
     """success-rate target reported by deterministic evaluation"""
 
+    # 2.5 运行时计算的批次与迭代数量
     # to be filled in runtime
     batch_size: int = 0
     """the batch size (computed in runtime)"""
@@ -156,6 +167,8 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
+
+# ==================== 3. 环境创建与通用辅助 ====================
 
 def environment_kwargs(env_id, args: Args, *, render_mode=None):
     """Build environment kwargs without passing RM75-only fields to UR5."""
@@ -166,8 +179,8 @@ def environment_kwargs(env_id, args: Args, *, render_mode=None):
     }
     if env_id in {"RM75-v0", "RM75Direction-v0"}:
         kwargs.update({
-            "target_sampling": args.target_sampling,
             "collision_penalty": args.collision_penalty,
+            "dist_success_thresh": args.dist_success_thresh,
         })
     if env_id == "RM75Direction-v0":
         kwargs["near_start_probability"] = args.near_start_probability
@@ -195,11 +208,61 @@ def make_env(env_id, *, args: Args):
     return thunk
 
 
+# 方向任务：用冻结策略准备近处起点，不将准备动作计入PPO样本。
+class ArrivalStartWrapper(gym.Wrapper):
+    """Training-only reset preparation; prefix actions never enter PPO batches."""
+    prefix_limit = 512
+
+    def __init__(self, env, model_path, probability):
+        super().__init__(env)
+        if not self.unwrapped.require_direction or self.unwrapped.near_start_probability != 0:
+            raise ValueError("arrival starts require a direction environment with IK near starts disabled")
+        if not np.isfinite(probability) or not 0.0 <= probability <= 1.0:
+            raise ValueError("arrival-start probability must be in [0, 1]")
+        self.probability = float(probability)
+        self.teacher = Agent(env)
+        load_agent_weights(model_path, self.teacher, "cpu")
+        self.teacher.eval().requires_grad_(False)
+
+    def reset(self, *, seed=None, options=None):
+        obs, info = self.env.reset(seed=seed, options=options)
+        base = self.unwrapped
+        if self.probability == 0.0 or base.rng.random() >= self.probability:
+            return obs, info
+        base.near_start_requested = True
+        spec = mj.mjtState.mjSTATE_INTEGRATION
+        saved = np.empty(mj.mj_stateSize(base.model, spec))
+        mj.mj_getState(base.model, base.data, saved, spec)
+        q_target = base.q_target.copy()
+        for _ in range(min(self.prefix_limit, base.horizon)):
+            with torch.no_grad():
+                action = torch.tanh(self.teacher.actor_mean(
+                    torch.as_tensor(obs[None], dtype=torch.float32),
+                ))[0].numpy()
+            obs, _, terminated, truncated, info = self.env.step(action)
+            base.arrival_prefix_steps += 1
+            qualified = info["position_success"] and info["direction_success"]
+            if terminated or truncated or info["collision"] or qualified:
+                break  # Do not start at a collision or an already-qualified pose.
+            if info["dist"] <= 0.06:
+                base.near_start = True
+                base.start_pos = base._ee_pos()
+                base._update_visualization_sites()
+                return base._finish_reset()
+#         # Preserve the original target and physical state, not an easier redraw.
+        mj.mj_setState(base.model, base.data, saved, spec)
+        base.q_target = q_target
+        mj.mj_forward(base.model, base.data)
+        return base._finish_reset()
+
+
 def log_scalars(writer, metrics, global_step, *, prefix="charts"):
     """Write scalar groups without changing metric names or step semantics."""
     for name, value in metrics.items():
         writer.add_scalar(f"{prefix}/{name}", float(value), global_step)
 
+
+# ==================== 4. Actor-Critic与动作分布 ====================
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -339,6 +402,9 @@ class Agent(nn.Module):
         return action, logprob, entropy, self.critic(x)
 
 
+# ==================== 5. 模型加载与断点续训 ====================
+
+# 5.1 checkpoint格式、路径与文件读取
 CHECKPOINT_FORMAT_VERSION = 1
 
 
@@ -373,6 +439,7 @@ def _is_full_training_checkpoint(payload):
     )
 
 
+# 5.2 init-from：加载权重，支持历史28维点模型扩展到31维方向模型
 def load_agent_weights(path, agent, device):
     """Load legacy weights or only the Agent part of a full checkpoint."""
     payload = _torch_load(resolve_training_path(path), device)
@@ -391,9 +458,9 @@ def load_agent_weights(path, agent, device):
     if source_obs_dim == target_obs_dim:
         agent.load_state_dict(state_dict, strict=True)
     elif source_obs_dim == 28 and target_obs_dim == 31:
-        # Preserve the validated 28-D point-reaching policy. The three new
-        # direction-error inputs start with zero influence and are learned by
-        # fine-tuning; every other compatible parameter is copied exactly.
+    #     # Preserve the validated 28-D point-reaching policy. The three new
+    #     # direction-error inputs start with zero influence and are learned by
+    #     # fine-tuning; every other compatible parameter is copied exactly.
         expanded_state = {}
         expandable_keys = {
             "actor_mean.0.weight",
@@ -436,53 +503,7 @@ def load_agent_weights(path, agent, device):
     return source_kind
 
 
-class ArrivalStartWrapper(gym.Wrapper):
-    """Training-only reset preparation; prefix actions never enter PPO batches."""
-    prefix_limit = 512
-
-    def __init__(self, env, model_path, probability):
-        super().__init__(env)
-        if not self.unwrapped.require_direction or self.unwrapped.near_start_probability != 0:
-            raise ValueError("arrival starts require a direction environment with IK near starts disabled")
-        if not np.isfinite(probability) or not 0.0 <= probability <= 1.0:
-            raise ValueError("arrival-start probability must be in [0, 1]")
-        self.probability = float(probability)
-        self.teacher = Agent(env)
-        load_agent_weights(model_path, self.teacher, "cpu")
-        self.teacher.eval().requires_grad_(False)
-
-    def reset(self, *, seed=None, options=None):
-        obs, info = self.env.reset(seed=seed, options=options)
-        base = self.unwrapped
-        if self.probability == 0.0 or base.rng.random() >= self.probability:
-            return obs, info
-        base.near_start_requested = True
-        spec = mj.mjtState.mjSTATE_INTEGRATION
-        saved = np.empty(mj.mj_stateSize(base.model, spec))
-        mj.mj_getState(base.model, base.data, saved, spec)
-        q_target = base.q_target.copy()
-        for _ in range(min(self.prefix_limit, base.horizon)):
-            with torch.no_grad():
-                action = torch.tanh(self.teacher.actor_mean(
-                    torch.as_tensor(obs[None], dtype=torch.float32),
-                ))[0].numpy()
-            obs, _, terminated, truncated, info = self.env.step(action)
-            base.arrival_prefix_steps += 1
-            qualified = info["position_success"] and info["direction_success"]
-            if terminated or truncated or info["collision"] or qualified:
-                break  # Do not start at a collision or an already-qualified pose.
-            if info["dist"] <= 0.06:
-                base.near_start = True
-                base.start_pos = base._ee_pos()
-                base._update_visualization_sites()
-                return base._finish_reset()
-        # Preserve the original target and physical state, not an easier redraw.
-        mj.mj_setState(base.model, base.data, saved, spec)
-        base.q_target = q_target
-        mj.mj_forward(base.model, base.data)
-        return base._finish_reset()
-
-
+# 5.3 随机状态的序列化与恢复
 def _capture_numpy_random_state():
     name, keys, position, has_gauss, cached_gaussian = np.random.get_state()
     return {
@@ -505,6 +526,7 @@ def _restore_numpy_random_state(state):
     ))
 
 
+# 5.4 完整训练checkpoint的保存、恢复与定期保存边界
 def save_training_checkpoint(
     path,
     agent,
@@ -584,6 +606,60 @@ def next_checkpoint_step(global_step, checkpoint_interval):
     ) * int(checkpoint_interval)
 
 
+# 5.5 resume-from：从checkpoint恢复训练配置
+RESUME_CONFIG_FIELDS = (
+    "seed",
+    "torch_deterministic",
+    "track",
+    "wandb_project_name",
+    "wandb_entity",
+    "save_model",
+    "checkpoint_interval",
+    "env_id",
+    "total_timesteps",
+    "learning_rate",
+    "num_envs",
+    "num_steps",
+    "anneal_lr",
+    "gamma",
+    "gae_lambda",
+    "num_minibatches",
+    "update_epochs",
+    "norm_adv",
+    "clip_coef",
+    "clip_vloss",
+    "ent_coef",
+    "initial_action_std",
+    "final_action_std",
+    "action_std_hold_fraction",
+    "vf_coef",
+    "max_grad_norm",
+    "target_kl",
+    "target_mode",
+    "target_pos",
+    "collision_penalty",
+    "dist_success_thresh",
+    "near_start_probability",
+    "near_start_from",
+    "eval_interval",
+    "eval_episodes",
+    "eval_seed",
+    "eval_max_collision_rate",
+    "eval_target_success",
+)
+
+
+def apply_resume_configuration(args, checkpoint_payload):
+    """Restore optimization-critical arguments while keeping runtime choices."""
+    saved_args = checkpoint_payload["args"]
+    for field_name in RESUME_CONFIG_FIELDS:
+        if field_name in saved_args:
+            setattr(args, field_name, saved_args[field_name])
+    return args
+
+
+# ==================== 6. 策略评估与最佳模型选择 ====================
+
 def should_update_best(
     metrics,
     best_metrics,
@@ -622,7 +698,7 @@ def should_update_best(
 
 @torch.no_grad()
 def evaluate_policy(agent, args, device, *, near_start=False):
-    """Same fixed goals; force full or near starts independently of training."""
+    """默认评估完整起点；near_start=True 单独评估IK近处起点，不使用教师包装器。"""
     kwargs = environment_kwargs(args.env_id, args, render_mode=None)
     if args.env_id == "RM75Direction-v0":
         kwargs["near_start_probability"] = 1.0 if near_start else 0.0
@@ -633,6 +709,7 @@ def evaluate_policy(agent, args, device, *, near_start=False):
     successes = []
     collisions = []
     final_distances = []
+    min_distances = []
     final_direction_angles = []
     position_successes = []
     angle_successes = []
@@ -651,10 +728,11 @@ def evaluate_policy(agent, args, device, *, near_start=False):
             valid_start = not near_start or bool(reset_info.get("near_start", False))
             valid_starts.append(float(valid_start))
             info = reset_info
+            min_distance = float(reset_info.get("dist", np.inf))
             step = 0
             for step in range(1, horizon + 1):
                 if not valid_start:
-                    # A failed near reset is a failed sample, not full-task success.
+                #     # A failed near reset is a failed sample, not full-task success.
                     step = 0
                     break
                 observation_tensor = torch.as_tensor(
@@ -668,11 +746,14 @@ def evaluate_policy(agent, args, device, *, near_start=False):
                 observation, _, terminated, truncated, info = (
                     eval_env.step(action)
                 )
+                if info.get("dist") is not None:
+                    min_distance = min(min_distance, float(info["dist"]))
                 if terminated or truncated:
                     break
             successes.append(float(bool(info.get("success", False))))
             collisions.append(float(bool(info.get("collision", False))))
             final_distances.append(float(info.get("dist", np.nan)))
+            min_distances.append(min_distance)
             direction_angle = info.get("direction_angle_deg", np.nan)
             final_direction_angles.append(
                 np.nan if direction_angle is None else float(direction_angle)
@@ -705,6 +786,15 @@ def evaluate_policy(agent, args, device, *, near_start=False):
         "position_success_rate": float(np.mean(position_successes)),
         "mean_episode_length": float(np.mean(episode_lengths)),
     }
+    if args.env_id == "RM75-v0" and args.target_mode != "none":
+        entered_5cm = np.asarray(min_distances) < 0.05
+        failed = np.asarray(successes) == 0.0
+        metrics.update({
+            "entered_5cm_rate": float(np.mean(entered_5cm)),
+            "near_failure_rate": float(np.mean(entered_5cm & failed)),
+            "never_entered_5cm_rate": float(np.mean(~entered_5cm & failed)),
+            "mean_min_distance": float(np.mean(min_distances)),
+        })
     if args.env_id == "RM75Direction-v0":
         metrics.update({
             "angle_success_rate": float(np.mean(angle_successes)),
@@ -785,58 +875,10 @@ def evaluate_and_maybe_save_best(
     return metrics, True
 
 
-RESUME_CONFIG_FIELDS = (
-    "seed",
-    "torch_deterministic",
-    "track",
-    "wandb_project_name",
-    "wandb_entity",
-    "save_model",
-    "checkpoint_interval",
-    "env_id",
-    "total_timesteps",
-    "learning_rate",
-    "num_envs",
-    "num_steps",
-    "anneal_lr",
-    "gamma",
-    "gae_lambda",
-    "num_minibatches",
-    "update_epochs",
-    "norm_adv",
-    "clip_coef",
-    "clip_vloss",
-    "ent_coef",
-    "initial_action_std",
-    "final_action_std",
-    "action_std_hold_fraction",
-    "vf_coef",
-    "max_grad_norm",
-    "target_kl",
-    "target_mode",
-    "target_pos",
-    "target_sampling",
-    "collision_penalty",
-    "near_start_probability",
-    "near_start_from",
-    "eval_interval",
-    "eval_episodes",
-    "eval_seed",
-    "eval_max_collision_rate",
-    "eval_target_success",
-)
-
-
-def apply_resume_configuration(args, checkpoint_payload):
-    """Restore optimization-critical arguments while keeping runtime choices."""
-    saved_args = checkpoint_payload["args"]
-    for field_name in RESUME_CONFIG_FIELDS:
-        if field_name in saved_args:
-            setattr(args, field_name, saved_args[field_name])
-    return args
-
+# ==================== 7. 训练主程序 ====================
 
 if __name__ == "__main__":
+    # ---------- 7.1 参数解析、校验与续训配置读取 ----------
     args = tyro.cli(Args)
     if args.init_from is not None and args.resume_from is not None:
         raise ValueError(
@@ -899,6 +941,7 @@ if __name__ == "__main__":
             "total_timesteps must contain at least one complete PPO batch"
         )
 
+    # ---------- 7.2 运行目录与日志记录器 ----------
     if resume_preview is None:
         run_name = (
             f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -943,6 +986,7 @@ if __name__ == "__main__":
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
+    # ---------- 7.3 随机种子与训练设备 ----------
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -951,9 +995,11 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
+    # ---------- 7.4 环境、Agent与优化器创建 ----------
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args=args) for _ in range(args.num_envs)]
+    [make_env(args.env_id, args=args) for _ in range(args.num_envs)],
+    autoreset_mode=gym.vector.AutoresetMode.DISABLED,
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
@@ -963,6 +1009,7 @@ if __name__ == "__main__":
     ).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
+    # ---------- 7.5 初始化权重或恢复完整训练状态 ----------
     global_step = 0
     completed_iteration = 0
     start_iteration = 1
@@ -997,6 +1044,7 @@ if __name__ == "__main__":
             f"next_iteration={start_iteration}/{args.num_iterations}"
         )
 
+    # ---------- 7.6 rollout缓存、初始观测与统计状态 ----------
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
@@ -1022,8 +1070,6 @@ if __name__ == "__main__":
     recent_near_starts = deque(maxlen=100)
     recent_region_successes = {
         "uniform": deque(maxlen=100),
-        "hard_negative_y": deque(maxlen=100),
-        "hard_far_x": deque(maxlen=100),
         "fixed": deque(maxlen=100),
     }
 
@@ -1050,6 +1096,7 @@ if __name__ == "__main__":
     last_eval_step = None
     stop_requested = {"value": False}
 
+    # ---------- 7.7 安全停止与checkpoint保存回调 ----------
     def save_latest_checkpoint():
         return save_training_checkpoint(
             latest_checkpoint_path, agent, optimizer,
@@ -1074,7 +1121,26 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, request_graceful_stop)
     interrupted = False
 
+    # ---------- 7.8 微调前的固定种子基线评估 ----------
+    # 微调前评估初始化模型，将其作为本轮选模基线。
+    if args.init_from is not None and args.eval_interval > 0:
+        print("Evaluating initialization before PPO updates...")
+
+        best_eval_metrics, _ = evaluate_and_maybe_save_best(
+            agent,
+            args,
+            device,
+            writer,
+            global_step=global_step,
+            best_metrics=None,
+            best_model_path=best_model_path,
+            best_metrics_path=best_metrics_path,
+        )
+        last_eval_step = global_step
+
+    # ---------- 7.9 PPO训练循环 ----------
     for iteration in range(start_iteration, args.num_iterations + 1):
+        # 7.9.1 本轮探索上限与学习率调度
         scheduled_action_std = compute_action_std(
             initial_action_std=args.initial_action_std,
             final_action_std=args.final_action_std,
@@ -1090,6 +1156,7 @@ if __name__ == "__main__":
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
+        # 7.9.2 交互采样：观测、动作、旧概率、旧Value与奖励
         for step in range(0, args.num_steps):
             global_step += args.num_envs
             obs[step] = next_obs
@@ -1104,11 +1171,17 @@ if __name__ == "__main__":
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
-            next_done = np.logical_or(terminations, truncations)
+            finished_envs= np.logical_or(terminations, truncations)
+            if np.any(finished_envs):
+                next_obs, _ = envs.reset(
+                    options={"reset_mask": finished_envs}
+                )
+            next_done = finished_envs
             rewards[step] = torch.as_tensor(reward, dtype=torch.float32, device=device).view(-1)
             next_obs = torch.as_tensor(next_obs, dtype=torch.float32, device=device)
             next_done = torch.as_tensor(next_done.astype(np.float32), dtype=torch.float32, device=device)
 
+            # 7.9.3 已完成回合的指标统计：点任务与方向任务
             # Gymnasium 1.3.x puts completed episode data directly in infos.
             if "episode" in infos:
                 episode_mask = infos.get(
@@ -1236,6 +1309,7 @@ if __name__ == "__main__":
                         })
                     log_scalars(writer, episode_metrics, global_step)
 
+        # 7.9.4 GAE优势与Critic回报目标；不构建梯度图
         # bootstrap value if not done
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
@@ -1252,6 +1326,7 @@ if __name__ == "__main__":
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
 
+        # 7.9.5 将时间维与环境维展平，形成训练批次
         # flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
@@ -1260,6 +1335,7 @@ if __name__ == "__main__":
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
+        # 7.9.6 小批次Actor/Critic损失、反向传播与参数更新
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
@@ -1314,6 +1390,7 @@ if __name__ == "__main__":
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
 
+        # 7.9.7 损失、学习率、探索、吞吐量与最近回合指标
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
@@ -1367,6 +1444,7 @@ if __name__ == "__main__":
                     global_step,
                 )
 
+        # 7.9.8 固定种子评估与最佳模型更新
         completed_iteration = iteration
         if (
             not stop_requested["value"]
@@ -1389,6 +1467,7 @@ if __name__ == "__main__":
                 args.eval_interval,
             )
 
+        # 7.9.9 定期保存可续训的完整checkpoint
         if (
             args.save_model
             and next_save_step is not None
@@ -1401,6 +1480,7 @@ if __name__ == "__main__":
                 args.checkpoint_interval,
             )
 
+        # 7.9.10 完成本轮后响应安全停止
         if stop_requested["value"]:
             interrupted = True
             if args.save_model:
@@ -1411,6 +1491,7 @@ if __name__ == "__main__":
                 )
             break
 
+    # ---------- 7.10 最终评估、模型保存与资源关闭 ----------
     signal.signal(signal.SIGINT, previous_sigint_handler)
 
     if (
