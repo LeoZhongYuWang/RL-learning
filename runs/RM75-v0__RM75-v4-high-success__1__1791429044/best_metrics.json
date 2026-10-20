@@ -1,8 +1,0 @@
-{
-  "collision_rate": 0.0,
-  "global_step": 2000896,
-  "mean_episode_length": 311.16,
-  "mean_final_distance": 0.065771873378675,
-  "meets_acceptance": true,
-  "success_rate": 0.84
-}
