@@ -219,3 +219,19 @@ __pycache__/
 .DS_Store
 .env
 *.log
+
+# =====================================
+# RM75 / PPO Training Outputs
+# =====================================
+
+# 训练结果目录
+runs/
+
+# 模型权重与检查点
+*.pt
+*.pth
+*.ckpt
+*.cleanrl_model
+
+# TensorBoard 日志
+events.out.tfevents.*
