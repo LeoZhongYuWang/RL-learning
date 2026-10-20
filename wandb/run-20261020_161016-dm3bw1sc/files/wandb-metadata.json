@@ -1,0 +1,15 @@
+{
+  "os": "Linux-6.8.0-111-generic-x86_64-with-glibc2.35",
+  "python": "CPython 3.10.12",
+  "startedAt": "2026-10-20T08:10:16.081826Z",
+  "program": "<stdin>",
+  "git": {
+    "remote": "https://github.com/LeoZhongYuWang/RL-learning.git",
+    "commit": "4da86e1f7a32853029c06101dd8972b7227e80ad"
+  },
+  "email": "1823152135@qq.com",
+  "root": "/home/zhongyu/wzy_master/acRM75-RL-source",
+  "host": "zhongyu-ROG-Strix-G16-G614PM-G614PM",
+  "executable": "/home/zhongyu/wzy_master/acRM75-RL-source/.venv/bin/python",
+  "writerId": "791vwaq39oed36alj4xwbs5zlctbuaun"
+}

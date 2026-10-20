@@ -1,14 +1,14 @@
 {
   "collision_rate": 0.0,
   "entered_5cm_rate": 0.91,
-  "global_step": 401408,
-  "mean_episode_length": 426.66,
+  "global_step": 999424,
+  "mean_episode_length": 361.96,
   "mean_final_direction_angle_deg": 0.0,
-  "mean_final_distance": 0.03710414551147048,
-  "mean_min_distance": 0.03343875142729259,
-  "meets_acceptance": false,
-  "near_failure_rate": 0.06,
+  "mean_final_distance": 0.036323511636677235,
+  "mean_min_distance": 0.03310241799628248,
+  "meets_acceptance": true,
+  "near_failure_rate": 0.01,
   "never_entered_5cm_rate": 0.09,
-  "position_success_rate": 0.85,
-  "success_rate": 0.85
+  "position_success_rate": 0.9,
+  "success_rate": 0.9
 }
